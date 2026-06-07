@@ -7,19 +7,53 @@ export function useWebSocket() {
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const resultsRef = useRef({});
+  const connectedRef = useRef(false);
+
+  const loadInitialData = useCallback(async () => {
+    try {
+      const apiBase = import.meta.env.VITE_API_HTTP_URL || '';
+      const [targetsRes, alertsRes] = await Promise.all([
+        fetch(`${apiBase}/api/targets`),
+        fetch(`${apiBase}/api/alerts?limit=50`)
+      ]);
+      if (targetsRes.ok && alertsRes.ok) {
+        const [targetsData, alertsData] = await Promise.all([
+          targetsRes.json(),
+          alertsRes.json()
+        ]);
+        setTargets(targetsData);
+        setAlerts(alertsData.reverse());
+      }
+    } catch (e) {
+      console.error('Failed to load initial data:', e);
+    }
+  }, []);
 
   const connect = useCallback(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.hostname;
-    const apiUrl = import.meta.env.VITE_API_URL || `${protocol}//${host}:8000`;
-    const wsUrl = apiUrl.replace(/^https?:/, protocol) + '/ws';
+    const apiBase = import.meta.env.VITE_API_URL || '';
+    let wsUrl;
+
+    if (apiBase) {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      wsUrl = apiBase.replace(/^https?:/, protocol).replace(/^ws:/, protocol).replace(/^wss:/, protocol);
+      if (!wsUrl.endsWith('/ws')) {
+        wsUrl = wsUrl.replace(/\/$/, '') + '/ws';
+      }
+    } else {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      wsUrl = `${protocol}//${window.location.host}/ws`;
+    }
+
+    console.log('Connecting WebSocket:', wsUrl);
 
     try {
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
+        console.log('WebSocket connected');
         setConnected(true);
+        connectedRef.current = true;
       };
 
       ws.onmessage = (event) => {
@@ -53,14 +87,17 @@ export function useWebSocket() {
       };
 
       ws.onclose = () => {
+        console.log('WebSocket disconnected');
         setConnected(false);
+        connectedRef.current = false;
         scheduleReconnect();
       };
 
-      ws.onerror = () => {
-        ws.close();
+      ws.onerror = (e) => {
+        console.error('WebSocket error');
       };
     } catch (e) {
+      console.error('Failed to create WebSocket:', e);
       scheduleReconnect();
     }
   }, []);
@@ -69,11 +106,14 @@ export function useWebSocket() {
     if (reconnectTimerRef.current) return;
     reconnectTimerRef.current = setTimeout(() => {
       reconnectTimerRef.current = null;
-      connect();
+      if (!connectedRef.current) {
+        connect();
+      }
     }, 3000);
   }, [connect]);
 
   useEffect(() => {
+    loadInitialData();
     connect();
     return () => {
       if (wsRef.current) {
@@ -83,7 +123,7 @@ export function useWebSocket() {
         clearTimeout(reconnectTimerRef.current);
       }
     };
-  }, [connect]);
+  }, [connect, loadInitialData]);
 
   const getResults = useCallback((targetId) => {
     return resultsRef.current[targetId] || [];
@@ -103,6 +143,7 @@ export function useWebSocket() {
     alerts,
     getResults,
     setTargets: setTargetsData,
-    setAlerts: setAlertsData
+    setAlerts: setAlertsData,
+    loadInitialData
   };
 }

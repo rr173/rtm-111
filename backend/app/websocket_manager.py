@@ -13,6 +13,7 @@ from .probe_engine import probe_engine
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Set[WebSocket] = set()
+        self._loop: asyncio.AbstractEventLoop = None
         self._setup_callbacks()
 
     def _setup_callbacks(self):
@@ -20,7 +21,12 @@ class ConnectionManager:
         probe_engine.register_alert_callback(self._on_alert)
         probe_engine.register_result_callback(self._on_probe_result)
 
+    def set_loop(self, loop: asyncio.AbstractEventLoop):
+        self._loop = loop
+
     async def connect(self, websocket: WebSocket):
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
         await websocket.accept()
         self.active_connections.add(websocket)
         await self._send_snapshot(websocket)
@@ -89,17 +95,30 @@ class ConnectionManager:
             db.close()
 
     def _on_status_update(self, data: dict):
-        asyncio.create_task(self._broadcast(data))
+        self._safe_broadcast(data)
 
     def _on_alert(self, data: dict):
-        asyncio.create_task(self._broadcast(data))
+        self._safe_broadcast(data)
 
     def _on_probe_result(self, data: dict):
-        asyncio.create_task(self._broadcast(data))
+        self._safe_broadcast(data)
+
+    def _safe_broadcast(self, message: dict):
+        if self._loop is None:
+            return
+
+        try:
+            if self._loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    self._broadcast(message),
+                    self._loop
+                )
+        except Exception as e:
+            print(f"Broadcast error: {e}")
 
     async def _broadcast(self, message: dict):
         dead_connections = []
-        for connection in self.active_connections:
+        for connection in list(self.active_connections):
             try:
                 await connection.send_json(message)
             except Exception:

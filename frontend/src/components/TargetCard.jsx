@@ -2,7 +2,7 @@ import { useMemo, useState, useEffect } from 'react';
 import StatusTimeline from './StatusTimeline';
 import LatencyChart from './LatencyChart';
 
-const API_BASE = import.meta.env.VITE_API_HTTP_URL || 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
 function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause, onToggleSilence, detailData }) {
   const [historyData, setHistoryData] = useState(null);

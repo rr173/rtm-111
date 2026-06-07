@@ -17,10 +17,15 @@ class ProbeEngine:
     def __init__(self):
         self.running = False
         self.tasks: Dict[int, asyncio.Task] = {}
-        self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_PROBES)
+        self.semaphore: Optional[asyncio.Semaphore] = None
         self.status_callbacks: List[Callable] = []
         self.alert_callbacks: List[Callable] = []
         self.result_callbacks: List[Callable] = []
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def set_loop(self, loop: asyncio.AbstractEventLoop):
+        self._loop = loop
+        self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_PROBES)
 
     def register_status_callback(self, callback: Callable):
         self.status_callbacks.append(callback)
@@ -33,18 +38,21 @@ class ProbeEngine:
 
     async def start(self):
         self.running = True
+        self._loop = asyncio.get_running_loop()
+        self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_PROBES)
+
         db = SessionLocal()
         try:
             targets = db.query(ProbeTarget).all()
             for target in targets:
                 if not target.paused:
-                    self._start_target_task(target.id)
+                    self._start_target_task_sync(target.id)
         finally:
             db.close()
 
     async def stop(self):
         self.running = False
-        for task in self.tasks.values():
+        for task in list(self.tasks.values()):
             task.cancel()
         self.tasks.clear()
 
@@ -53,13 +61,17 @@ class ProbeEngine:
         try:
             target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
             if target and not target.paused and target_id not in self.tasks:
-                self._start_target_task(target_id)
+                self._start_target_task_sync(target_id)
         finally:
             db.close()
 
     def remove_target(self, target_id: int):
         if target_id in self.tasks:
-            self.tasks[target_id].cancel()
+            task = self.tasks[target_id]
+            if self._loop and self._loop.is_running():
+                self._loop.call_soon_threadsafe(task.cancel)
+            else:
+                task.cancel()
             del self.tasks[target_id]
 
     def toggle_target(self, target_id: int, paused: bool):
@@ -68,9 +80,30 @@ class ProbeEngine:
         else:
             self.add_target(target_id)
 
-    def _start_target_task(self, target_id: int):
-        task = asyncio.create_task(self._run_probe_loop(target_id))
-        self.tasks[target_id] = task
+    def _start_target_task_sync(self, target_id: int):
+        if self._loop is None:
+            return
+
+        if self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._start_target_task_async(target_id),
+                self._loop
+            )
+        else:
+            self._loop.call_soon(
+                lambda: asyncio.create_task(self._run_probe_loop(target_id))
+            )
+
+    async def _start_task_async(self, target_id: int):
+        if target_id not in self.tasks:
+            task = asyncio.create_task(self._run_probe_loop(target_id))
+            self.tasks[target_id] = task
+
+    async def _start_target_task_async(self, target_id: int):
+        if target_id not in self.tasks:
+            task = asyncio.create_task(self._run_probe_loop(target_id))
+            self.tasks[target_id] = task
+            task.add_done_callback(lambda t: self.tasks.pop(target_id, None))
 
     async def _run_probe_loop(self, target_id: int):
         while self.running:
@@ -172,7 +205,10 @@ class ProbeEngine:
                 except Exception as e:
                     return False, str(e)
                 finally:
-                    sock.close()
+                    try:
+                        sock.close()
+                    except:
+                        pass
 
             success, error = await asyncio.get_event_loop().run_in_executor(None, _connect)
             latency = (time.time() - start) * 1000

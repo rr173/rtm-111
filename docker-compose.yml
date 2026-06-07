@@ -20,8 +20,8 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - VITE_API_HTTP_URL=http://localhost:8000
-      - VITE_API_URL=ws://localhost:8000
+      - VITE_PROXY_HTTP=http://backend:8000
+      - VITE_PROXY_WS=ws://backend:8000
     depends_on:
       - backend
     restart: unless-stopped

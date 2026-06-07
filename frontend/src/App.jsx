@@ -5,7 +5,7 @@ import TargetList from './components/TargetList';
 import AlertPanel from './components/AlertPanel';
 import AddTargetModal from './components/AddTargetModal';
 
-const API_BASE = import.meta.env.VITE_API_HTTP_URL || 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
 function App() {
   const { connected, targets, alerts, setTargets, setAlerts } = useWebSocket();

@@ -28,6 +28,10 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
+    import asyncio
+    loop = asyncio.get_running_loop()
+    probe_engine.set_loop(loop)
+    manager.set_loop(loop)
     _init_demo_data()
     await probe_engine.start()
 
