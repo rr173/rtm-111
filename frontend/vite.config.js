@@ -10,14 +10,14 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     server: {
       host: '0.0.0.0',
-      port: 3000,
+      port: 5111,
       proxy: {
         '/api': {
           target: proxyHttp,
           changeOrigin: true,
         },
         '/ws': {
-          target: proxyWs,
+          target: proxyHttp,
           ws: true,
           changeOrigin: true,
         },
