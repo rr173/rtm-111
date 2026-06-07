@@ -61,7 +61,41 @@ export function useWebSocket() {
 
         if (data.type === 'snapshot') {
           setTargets(data.targets || []);
-          setAlerts(data.alerts || []);
+          setAlerts(prevAlerts => {
+            const snapshotAlerts = data.alerts || [];
+            const merged = new Map();
+            for (const a of prevAlerts) {
+              merged.set(a.id, a);
+            }
+            for (const a of snapshotAlerts) {
+              merged.set(a.id, a);
+            }
+            return Array.from(merged.values())
+              .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+              .slice(0, 100);
+          });
+
+          if (data.targets) {
+            for (const target of data.targets) {
+              if (target.recent_results && target.recent_results.length > 0) {
+                const existing = resultsRef.current[target.id] || [];
+                const merged = new Map();
+                for (const r of existing) {
+                  merged.set(r.timestamp, r);
+                }
+                for (const r of target.recent_results) {
+                  merged.set(r.timestamp, r);
+                }
+                const sorted = Array.from(merged.values())
+                  .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+                if (sorted.length > 200) {
+                  resultsRef.current[target.id] = sorted.slice(-200);
+                } else {
+                  resultsRef.current[target.id] = sorted;
+                }
+              }
+            }
+          }
         } else if (data.type === 'status_update') {
           setTargets(prev => {
             const idx = prev.findIndex(t => t.id === data.target.id);

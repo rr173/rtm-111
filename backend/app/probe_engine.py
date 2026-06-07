@@ -244,6 +244,10 @@ class ProbeEngine:
 
         if new_status != old_status:
             target.status = new_status
+            if new_status == "healthy":
+                target.consecutive_successes = 0
+            else:
+                target.consecutive_failures = 0
             alert = Alert(
                 target_id=target.id,
                 from_status=old_status,

@@ -38,13 +38,13 @@ class ConnectionManager:
         db = SessionLocal()
         try:
             targets = db.query(ProbeTarget).all()
-            alerts = db.query(Alert).order_by(Alert.timestamp.desc()).limit(50).all()
+            alerts = db.query(Alert).order_by(Alert.timestamp.desc()).limit(100).all()
 
             targets_data = []
             for t in targets:
                 recent_results = db.query(ProbeResult).filter(
                     ProbeResult.target_id == t.id
-                ).order_by(ProbeResult.timestamp.desc()).limit(60).all()
+                ).order_by(ProbeResult.timestamp.desc()).limit(120).all()
 
                 results_data = []
                 for r in reversed(recent_results):
@@ -88,7 +88,7 @@ class ConnectionManager:
             snapshot = {
                 "type": "snapshot",
                 "targets": targets_data,
-                "alerts": list(reversed(alerts_data))
+                "alerts": alerts_data
             }
             await websocket.send_json(snapshot)
         finally:
