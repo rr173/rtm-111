@@ -14,6 +14,11 @@ class ProbeGroup(Base):
     degrade_threshold = Column(Integer, default=2)
     down_threshold = Column(Integer, default=5)
     success_threshold = Column(Integer, default=3)
+    adaptive_enabled = Column(Boolean, default=False)
+    slow_interval = Column(Integer, default=60)
+    fast_interval = Column(Integer, default=5)
+    silent_start = Column(String(5), nullable=True)
+    silent_end = Column(String(5), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -40,6 +45,11 @@ class ProbeTarget(Base):
     degrade_threshold = Column(Integer, nullable=True)
     down_threshold = Column(Integer, nullable=True)
     success_threshold = Column(Integer, nullable=True)
+    adaptive_enabled = Column(Boolean, nullable=True)
+    slow_interval = Column(Integer, nullable=True)
+    fast_interval = Column(Integer, nullable=True)
+    silent_start = Column(String(5), nullable=True)
+    silent_end = Column(String(5), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

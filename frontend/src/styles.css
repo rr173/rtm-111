@@ -884,3 +884,69 @@ body {
   color: #e2e8f0;
   font-weight: 500;
 }
+
+.silent-window-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 10px;
+  background-color: rgba(100, 116, 139, 0.2);
+  color: #94a3b8;
+}
+
+.adaptive-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 10px;
+  background-color: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+}
+
+.target-strategy-info {
+  display: flex;
+  gap: 16px;
+  margin-top: 6px;
+  font-size: 11px;
+}
+
+.strategy-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.strategy-label {
+  color: #64748b;
+}
+
+.strategy-value {
+  color: #cbd5e1;
+  font-weight: 500;
+}
+
+.timeline-segment.silent-segment {
+  position: relative;
+}
+
+.timeline-segment.silent-segment::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(71, 85, 105, 0.6);
+  border-radius: 2px;
+}
+
+.status-enabled {
+  color: #22c55e;
+  font-weight: 500;
+}
+
+.status-disabled {
+  color: #64748b;
+}

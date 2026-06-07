@@ -50,9 +50,10 @@ class ConnectionManager:
             return "healthy"
 
     async def _send_snapshot(self, websocket: WebSocket):
+        from sqlalchemy.orm import joinedload
         db = SessionLocal()
         try:
-            targets = db.query(ProbeTarget).all()
+            targets = db.query(ProbeTarget).options(joinedload(ProbeTarget.group)).all()
             groups = db.query(ProbeGroup).all()
             alerts = db.query(Alert).order_by(Alert.timestamp.desc()).limit(100).all()
 
@@ -70,6 +71,11 @@ class ConnectionManager:
                         "latency_ms": r.latency_ms,
                         "error_message": r.error_message
                     })
+
+                strategy = probe_engine._get_effective_strategy(t)
+                current_interval = probe_engine._get_effective_interval(t)
+                in_silent = probe_engine._is_in_silent_window(t)
+                next_probe_at = datetime.utcnow() + timedelta(seconds=current_interval)
 
                 targets_data.append({
                     "id": t.id,
@@ -90,6 +96,14 @@ class ConnectionManager:
                     "degrade_threshold": t.degrade_threshold,
                     "down_threshold": t.down_threshold,
                     "success_threshold": t.success_threshold,
+                    "adaptive_enabled": strategy["adaptive_enabled"],
+                    "slow_interval": strategy["slow_interval"],
+                    "fast_interval": strategy["fast_interval"],
+                    "silent_start": strategy["silent_start"],
+                    "silent_end": strategy["silent_end"],
+                    "current_interval": current_interval,
+                    "next_probe_at": next_probe_at.isoformat(),
+                    "in_silent_window": in_silent,
                     "recent_results": results_data
                 })
 
@@ -104,6 +118,11 @@ class ConnectionManager:
                     "degrade_threshold": g.degrade_threshold,
                     "down_threshold": g.down_threshold,
                     "success_threshold": g.success_threshold,
+                    "adaptive_enabled": g.adaptive_enabled,
+                    "slow_interval": g.slow_interval,
+                    "fast_interval": g.fast_interval,
+                    "silent_start": g.silent_start,
+                    "silent_end": g.silent_end,
                     "status": self._calculate_group_status(group_targets),
                     "target_count": len(group_targets),
                     "paused_count": sum(1 for t in group_targets if t.paused),

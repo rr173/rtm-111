@@ -8,13 +8,20 @@ function AddTargetModal({ onClose, onSubmit, groups = [] }) {
     group_id: '',
     interval: 30,
     timeout: 5,
-    expected_status: '200'
+    expected_status: '200',
+    adaptive_enabled: false,
+    slow_interval: 60,
+    fast_interval: 5,
+    silent_start: '',
+    silent_end: ''
   });
 
   const handleChange = (e) => {
-    const { name, value } = e.target;
+    const { name, value, type, checked } = e.target;
     let parsedValue = value;
-    if (name === 'interval' || name === 'timeout') {
+    if (type === 'checkbox') {
+      parsedValue = checked;
+    } else if (name === 'interval' || name === 'timeout' || name === 'slow_interval' || name === 'fast_interval') {
       parsedValue = Number(value);
     } else if (name === 'group_id') {
       parsedValue = value === '' ? null : Number(value);
@@ -35,6 +42,14 @@ function AddTargetModal({ onClose, onSubmit, groups = [] }) {
     }
     if (data.group_id === null) {
       delete data.group_id;
+    }
+    if (!data.silent_start || !data.silent_end) {
+      delete data.silent_start;
+      delete data.silent_end;
+    }
+    if (!data.adaptive_enabled) {
+      delete data.slow_interval;
+      delete data.fast_interval;
     }
     onSubmit(data);
   };
@@ -124,7 +139,7 @@ function AddTargetModal({ onClose, onSubmit, groups = [] }) {
           )}
 
           <div className="form-group">
-            <label>探测间隔 (秒)</label>
+            <label>基准探测间隔 (秒)</label>
             <input
               type="range"
               name="interval"
@@ -137,6 +152,74 @@ function AddTargetModal({ onClose, onSubmit, groups = [] }) {
             <div style={{ fontSize: '12px', color: '#64748b', textAlign: 'center' }}>
               {formData.interval} 秒
             </div>
+          </div>
+
+          <div className="form-group">
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                name="adaptive_enabled"
+                checked={formData.adaptive_enabled}
+                onChange={handleChange}
+                style={{ width: 'auto' }}
+              />
+              启用自适应探测间隔
+            </label>
+            <span className="form-hint">健康时慢速探测节省资源，异常时快速探测确认故障</span>
+          </div>
+
+          {formData.adaptive_enabled && (
+            <div className="form-row">
+              <div className="form-group">
+                <label>慢速间隔 (秒)</label>
+                <input
+                  type="number"
+                  name="slow_interval"
+                  min="5"
+                  max="600"
+                  value={formData.slow_interval}
+                  onChange={handleChange}
+                />
+                <span className="form-hint">健康/故障确认后使用</span>
+              </div>
+              <div className="form-group">
+                <label>快速间隔 (秒)</label>
+                <input
+                  type="number"
+                  name="fast_interval"
+                  min="1"
+                  max="120"
+                  value={formData.fast_interval}
+                  onChange={handleChange}
+                />
+                <span className="form-hint">异常检测时使用</span>
+              </div>
+            </div>
+          )}
+
+          <div className="form-group">
+            <label>静默时段</label>
+            <div className="form-row">
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <input
+                  type="time"
+                  name="silent_start"
+                  value={formData.silent_start}
+                  onChange={handleChange}
+                />
+                <span className="form-hint">开始时间 (UTC)</span>
+              </div>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <input
+                  type="time"
+                  name="silent_end"
+                  value={formData.silent_end}
+                  onChange={handleChange}
+                />
+                <span className="form-hint">结束时间 (UTC)</span>
+              </div>
+            </div>
+            <span className="form-hint">静默时段内暂停探测且不产生告警</span>
           </div>
 
           <div className="modal-actions">

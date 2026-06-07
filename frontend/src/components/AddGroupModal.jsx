@@ -21,7 +21,12 @@ function AddGroupModal({ onClose, onSubmit }) {
     color: '#3b82f6',
     degrade_threshold: 2,
     down_threshold: 5,
-    success_threshold: 3
+    success_threshold: 3,
+    adaptive_enabled: false,
+    slow_interval: 60,
+    fast_interval: 5,
+    silent_start: '',
+    silent_end: ''
   });
   const [submitting, setSubmitting] = useState(false);
 
@@ -32,12 +37,22 @@ function AddGroupModal({ onClose, onSubmit }) {
       return;
     }
 
+    const submitData = { ...formData };
+    if (!submitData.silent_start || !submitData.silent_end) {
+      delete submitData.silent_start;
+      delete submitData.silent_end;
+    }
+    if (!submitData.adaptive_enabled) {
+      delete submitData.slow_interval;
+      delete submitData.fast_interval;
+    }
+
     setSubmitting(true);
     try {
       const res = await fetch(`${API_BASE}/api/groups`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData)
+        body: JSON.stringify(submitData)
       });
       if (res.ok) {
         const newGroup = await res.json();
@@ -54,6 +69,17 @@ function AddGroupModal({ onClose, onSubmit }) {
     }
   };
 
+  const handleChange = (e) => {
+    const { name, value, type, checked } = e.target;
+    let parsedValue = value;
+    if (type === 'checkbox') {
+      parsedValue = checked;
+    } else if (['degrade_threshold', 'down_threshold', 'success_threshold', 'slow_interval', 'fast_interval'].includes(name)) {
+      parsedValue = parseInt(value) || 1;
+    }
+    setFormData(prev => ({ ...prev, [name]: parsedValue }));
+  };
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -64,8 +90,9 @@ function AddGroupModal({ onClose, onSubmit }) {
             <label>分组名称 *</label>
             <input
               type="text"
+              name="name"
               value={formData.name}
-              onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
+              onChange={handleChange}
               placeholder="例如：生产环境"
               autoFocus
             />
@@ -75,8 +102,9 @@ function AddGroupModal({ onClose, onSubmit }) {
             <label>描述</label>
             <input
               type="text"
+              name="description"
               value={formData.description}
-              onChange={(e) => setFormData(prev => ({ ...prev, description: e.target.value }))}
+              onChange={handleChange}
               placeholder="可选，分组说明"
             />
           </div>
@@ -105,13 +133,11 @@ function AddGroupModal({ onClose, onSubmit }) {
               <label>降级阈值</label>
               <input
                 type="number"
+                name="degrade_threshold"
                 min="1"
                 max="100"
                 value={formData.degrade_threshold}
-                onChange={(e) => setFormData(prev => ({
-                  ...prev,
-                  degrade_threshold: parseInt(e.target.value) || 1
-                }))}
+                onChange={handleChange}
               />
               <span className="form-hint">连续失败次数</span>
             </div>
@@ -119,13 +145,11 @@ function AddGroupModal({ onClose, onSubmit }) {
               <label>故障阈值</label>
               <input
                 type="number"
+                name="down_threshold"
                 min="1"
                 max="100"
                 value={formData.down_threshold}
-                onChange={(e) => setFormData(prev => ({
-                  ...prev,
-                  down_threshold: parseInt(e.target.value) || 1
-                }))}
+                onChange={handleChange}
               />
               <span className="form-hint">连续失败次数</span>
             </div>
@@ -135,15 +159,85 @@ function AddGroupModal({ onClose, onSubmit }) {
             <label>恢复阈值</label>
             <input
               type="number"
+              name="success_threshold"
               min="1"
               max="100"
               value={formData.success_threshold}
-              onChange={(e) => setFormData(prev => ({
-                ...prev,
-                success_threshold: parseInt(e.target.value) || 1
-              }))}
+              onChange={handleChange}
             />
             <span className="form-hint">连续成功次数后恢复健康</span>
+          </div>
+
+          <h3 style={{ fontSize: '14px', marginTop: '20px', marginBottom: '12px', color: '#cbd5e1' }}>
+            探测策略
+          </h3>
+
+          <div className="form-group">
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                name="adaptive_enabled"
+                checked={formData.adaptive_enabled}
+                onChange={handleChange}
+                style={{ width: 'auto' }}
+              />
+              启用自适应探测间隔
+            </label>
+            <span className="form-hint">健康时慢速探测节省资源，异常时快速探测确认故障</span>
+          </div>
+
+          {formData.adaptive_enabled && (
+            <div className="form-row">
+              <div className="form-group">
+                <label>慢速间隔 (秒)</label>
+                <input
+                  type="number"
+                  name="slow_interval"
+                  min="5"
+                  max="600"
+                  value={formData.slow_interval}
+                  onChange={handleChange}
+                />
+                <span className="form-hint">健康/故障确认后使用</span>
+              </div>
+              <div className="form-group">
+                <label>快速间隔 (秒)</label>
+                <input
+                  type="number"
+                  name="fast_interval"
+                  min="1"
+                  max="120"
+                  value={formData.fast_interval}
+                  onChange={handleChange}
+                />
+                <span className="form-hint">异常检测时使用</span>
+              </div>
+            </div>
+          )}
+
+          <div className="form-group">
+            <label>静默时段</label>
+            <div className="form-row">
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <input
+                  type="time"
+                  name="silent_start"
+                  value={formData.silent_start}
+                  onChange={handleChange}
+                />
+                <span className="form-hint">开始时间 (UTC)</span>
+              </div>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <input
+                  type="time"
+                  name="silent_end"
+                  value={formData.silent_end}
+                  onChange={handleChange}
+                />
+                <span className="form-hint">结束时间 (UTC)</span>
+              </div>
+            </div>
+            <span className="form-hint">静默时段内暂停探测且不产生告警</span>
           </div>
 
           <div className="modal-actions">

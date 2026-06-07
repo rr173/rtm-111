@@ -8,6 +8,7 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
   const [historyData, setHistoryData] = useState(null);
   const [alertsHistory, setAlertsHistory] = useState([]);
   const [selectedGroupId, setSelectedGroupId] = useState(target.group_id || '');
+  const [nextProbeCountdown, setNextProbeCountdown] = useState(null);
 
   useEffect(() => {
     if (expanded) {
@@ -15,6 +16,24 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
       fetchAlerts();
     }
   }, [expanded, target.id]);
+
+  useEffect(() => {
+    if (!target.next_probe_at) {
+      setNextProbeCountdown(null);
+      return;
+    }
+
+    const updateCountdown = () => {
+      const now = Date.now();
+      const next = new Date(target.next_probe_at).getTime();
+      const diff = Math.max(0, Math.ceil((next - now) / 1000));
+      setNextProbeCountdown(diff);
+    };
+
+    updateCountdown();
+    const timer = setInterval(updateCountdown, 1000);
+    return () => clearInterval(timer);
+  }, [target.next_probe_at]);
 
   const fetchHistory = async () => {
     try {
@@ -77,6 +96,16 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
     }
   };
 
+  const formatCountdown = (seconds) => {
+    if (seconds === null || seconds === undefined) return '—';
+    if (seconds < 60) return `${seconds}秒`;
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}分${secs}秒`;
+  };
+
+  const hasSilentWindow = target.silent_start && target.silent_end;
+
   return (
     <div className={`target-card ${expanded ? 'expanded' : ''}`}>
       <div className="target-header" onClick={onToggleExpand}>
@@ -87,10 +116,28 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
               {statusLabel}
             </span>
             {target.silenced && <span className="silenced-badge">已消声</span>}
+            {target.in_silent_window && <span className="silent-window-badge">静默中</span>}
+            {target.adaptive_enabled && <span className="adaptive-badge">自适应</span>}
           </div>
           <div className="target-address">
             {target.type.toUpperCase()} · {target.address}
             {target.expected_status && ` · 期望: ${target.expected_status}`}
+          </div>
+          <div className="target-strategy-info">
+            <span className="strategy-item">
+              <span className="strategy-label">当前间隔:</span>
+              <span className="strategy-value">{target.current_interval || target.interval}秒</span>
+            </span>
+            <span className="strategy-item">
+              <span className="strategy-label">下次探测:</span>
+              <span className="strategy-value">{formatCountdown(nextProbeCountdown)}</span>
+            </span>
+            {hasSilentWindow && (
+              <span className="strategy-item">
+                <span className="strategy-label">静默时段:</span>
+                <span className="strategy-value">{target.silent_start} - {target.silent_end}</span>
+              </span>
+            )}
           </div>
         </div>
 
@@ -99,6 +146,9 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
             targetId={target.id}
             results={detailData?.results || target.recent_results || []}
             interval={target.interval}
+            silentStart={target.silent_start}
+            silentEnd={target.silent_end}
+            inSilentWindow={target.in_silent_window}
           />
         </div>
 
@@ -217,8 +267,18 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
                 </span>
               </div>
               <div className="detail-row">
-                <span className="detail-label">探测间隔:</span>
+                <span className="detail-label">基准间隔:</span>
                 <span className="detail-value">{target.interval} 秒</span>
+              </div>
+              <div className="detail-row">
+                <span className="detail-label">当前间隔:</span>
+                <span className="detail-value" style={{ color: '#22c55e', fontWeight: 'bold' }}>
+                  {target.current_interval || target.interval} 秒
+                </span>
+              </div>
+              <div className="detail-row">
+                <span className="detail-label">下次探测:</span>
+                <span className="detail-value">{formatCountdown(nextProbeCountdown)}</span>
               </div>
               <div className="detail-row">
                 <span className="detail-label">超时时间:</span>
@@ -235,6 +295,50 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
               <div className="detail-row">
                 <span className="detail-label">最后探测:</span>
                 <span className="detail-value">{formatTime(target.last_check)}</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="detail-section">
+            <h3>⚙️ 探测策略</h3>
+            <div style={{ fontSize: '13px', color: '#94a3b8', lineHeight: '2' }}>
+              <div className="detail-row">
+                <span className="detail-label">自适应间隔:</span>
+                <span className="detail-value">
+                  <span className={target.adaptive_enabled ? 'status-enabled' : 'status-disabled'}>
+                    {target.adaptive_enabled ? '已启用' : '未启用'}
+                  </span>
+                </span>
+              </div>
+              {target.adaptive_enabled && (
+                <>
+                  <div className="detail-row">
+                    <span className="detail-label">慢速间隔:</span>
+                    <span className="detail-value">{target.slow_interval} 秒 (健康/故障时)</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">快速间隔:</span>
+                    <span className="detail-value">{target.fast_interval} 秒 (异常检测时)</span>
+                  </div>
+                </>
+              )}
+              <div className="detail-row">
+                <span className="detail-label">静默时段:</span>
+                <span className="detail-value">
+                  {target.silent_start && target.silent_end
+                    ? `${target.silent_start} - ${target.silent_end}`
+                    : '未设置'}
+                </span>
+              </div>
+              <div className="detail-row">
+                <span className="detail-label">当前状态:</span>
+                <span className="detail-value">
+                  {target.in_silent_window ? (
+                    <span style={{ color: '#f59e0b' }}>静默中 - 暂停探测</span>
+                  ) : (
+                    <span style={{ color: '#22c55e' }}>正常探测中</span>
+                  )}
+                </span>
               </div>
             </div>
           </div>

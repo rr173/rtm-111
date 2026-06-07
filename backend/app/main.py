@@ -15,7 +15,85 @@ from .schemas import (
 from .probe_engine import probe_engine
 from .websocket_manager import manager, get_target_history
 
+
+def _enrich_target(target: ProbeTarget) -> dict:
+    strategy = probe_engine._get_effective_strategy(target)
+    current_interval = probe_engine._get_effective_interval(target)
+    in_silent = probe_engine._is_in_silent_window(target)
+    next_probe_at = datetime.utcnow() + timedelta(seconds=current_interval)
+
+    return {
+        "id": target.id,
+        "group_id": target.group_id,
+        "name": target.name,
+        "type": target.type,
+        "address": target.address,
+        "interval": target.interval,
+        "timeout": target.timeout,
+        "expected_status": target.expected_status,
+        "paused": target.paused,
+        "silenced": target.silenced,
+        "status": target.status,
+        "consecutive_failures": target.consecutive_failures,
+        "consecutive_successes": target.consecutive_successes,
+        "last_check": target.last_check,
+        "degrade_threshold": target.degrade_threshold,
+        "down_threshold": target.down_threshold,
+        "success_threshold": target.success_threshold,
+        "adaptive_enabled": strategy["adaptive_enabled"],
+        "slow_interval": strategy["slow_interval"],
+        "fast_interval": strategy["fast_interval"],
+        "silent_start": strategy["silent_start"],
+        "silent_end": strategy["silent_end"],
+        "current_interval": current_interval,
+        "next_probe_at": next_probe_at,
+        "in_silent_window": in_silent,
+        "created_at": target.created_at,
+    }
+
 Base.metadata.create_all(bind=engine)
+
+
+def _migrate_database():
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        try:
+            result = conn.execute(text("PRAGMA table_info(probe_groups)"))
+            columns = [row[1] for row in result.fetchall()]
+
+            group_new_columns = [
+                ("adaptive_enabled", "INTEGER DEFAULT 0"),
+                ("slow_interval", "INTEGER DEFAULT 60"),
+                ("fast_interval", "INTEGER DEFAULT 5"),
+                ("silent_start", "VARCHAR(5)"),
+                ("silent_end", "VARCHAR(5)"),
+            ]
+            for col_name, col_def in group_new_columns:
+                if col_name not in columns:
+                    conn.execute(text(f"ALTER TABLE probe_groups ADD COLUMN {col_name} {col_def}"))
+                    print(f"Added column {col_name} to probe_groups")
+
+            result = conn.execute(text("PRAGMA table_info(probe_targets)"))
+            columns = [row[1] for row in result.fetchall()]
+
+            target_new_columns = [
+                ("adaptive_enabled", "INTEGER DEFAULT 0"),
+                ("slow_interval", "INTEGER DEFAULT 60"),
+                ("fast_interval", "INTEGER DEFAULT 5"),
+                ("silent_start", "VARCHAR(5)"),
+                ("silent_end", "VARCHAR(5)"),
+            ]
+            for col_name, col_def in target_new_columns:
+                if col_name not in columns:
+                    conn.execute(text(f"ALTER TABLE probe_targets ADD COLUMN {col_name} {col_def}"))
+                    print(f"Added column {col_name} to probe_targets")
+
+            conn.commit()
+        except Exception as e:
+            print(f"Migration error: {e}")
+
+
+_migrate_database()
 
 app = FastAPI(title="Probe Dashboard API")
 
@@ -59,7 +137,12 @@ def _init_demo_data():
             color="#ef4444",
             degrade_threshold=3,
             down_threshold=8,
-            success_threshold=3
+            success_threshold=3,
+            adaptive_enabled=True,
+            slow_interval=60,
+            fast_interval=5,
+            silent_start="02:00",
+            silent_end="06:00"
         )
         db.add(group1)
         db.flush()
@@ -70,7 +153,10 @@ def _init_demo_data():
             color="#22c55e",
             degrade_threshold=5,
             down_threshold=10,
-            success_threshold=2
+            success_threshold=2,
+            adaptive_enabled=False,
+            slow_interval=120,
+            fast_interval=10
         )
         db.add(group2)
         db.flush()
@@ -81,7 +167,12 @@ def _init_demo_data():
             color="#3b82f6",
             degrade_threshold=2,
             down_threshold=5,
-            success_threshold=3
+            success_threshold=3,
+            adaptive_enabled=True,
+            slow_interval=120,
+            fast_interval=15,
+            silent_start="01:00",
+            silent_end="05:00"
         )
         db.add(group3)
         db.flush()
@@ -389,31 +480,36 @@ def apply_group_thresholds(group_id: int, db: Session = Depends(get_db)):
 
 @app.get("/api/targets", response_model=List[ProbeTargetResponse])
 def list_targets(db: Session = Depends(get_db)):
-    targets = db.query(ProbeTarget).order_by(ProbeTarget.id.asc()).all()
-    return targets
+    from sqlalchemy.orm import joinedload
+    targets = db.query(ProbeTarget).options(joinedload(ProbeTarget.group)).order_by(ProbeTarget.id.asc()).all()
+    return [_enrich_target(t) for t in targets]
 
 
 @app.post("/api/targets", response_model=ProbeTargetResponse)
 def create_target(target: ProbeTargetCreate, db: Session = Depends(get_db)):
+    from sqlalchemy.orm import joinedload
     db_target = ProbeTarget(**target.model_dump())
     db.add(db_target)
     db.commit()
     db.refresh(db_target)
     probe_engine.add_target(db_target.id)
-    return db_target
+    db_target = db.query(ProbeTarget).options(joinedload(ProbeTarget.group)).filter(ProbeTarget.id == db_target.id).first()
+    return _enrich_target(db_target)
 
 
 @app.get("/api/targets/{target_id}", response_model=ProbeTargetResponse)
 def get_target(target_id: int, db: Session = Depends(get_db)):
-    target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+    from sqlalchemy.orm import joinedload
+    target = db.query(ProbeTarget).options(joinedload(ProbeTarget.group)).filter(ProbeTarget.id == target_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="Target not found")
-    return target
+    return _enrich_target(target)
 
 
 @app.put("/api/targets/{target_id}", response_model=ProbeTargetResponse)
 def update_target(target_id: int, target_update: ProbeTargetUpdate, db: Session = Depends(get_db)):
-    target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+    from sqlalchemy.orm import joinedload
+    target = db.query(ProbeTarget).options(joinedload(ProbeTarget.group)).filter(ProbeTarget.id == target_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="Target not found")
 
@@ -429,7 +525,7 @@ def update_target(target_id: int, target_update: ProbeTargetUpdate, db: Session 
     if "paused" in update_data and old_paused != target.paused:
         probe_engine.toggle_target(target.id, target.paused)
 
-    return target
+    return _enrich_target(target)
 
 
 @app.delete("/api/targets/{target_id}")

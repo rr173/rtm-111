@@ -22,6 +22,7 @@ class ProbeEngine:
         self.alert_callbacks: List[Callable] = []
         self.result_callbacks: List[Callable] = []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._interval_cache: Dict[int, int] = {}
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
@@ -106,14 +107,24 @@ class ProbeEngine:
             task.add_done_callback(lambda t: self.tasks.pop(target_id, None))
 
     async def _run_probe_loop(self, target_id: int):
+        from sqlalchemy.orm import joinedload
         while self.running:
             db = SessionLocal()
             try:
-                target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+                target = db.query(ProbeTarget).options(joinedload(ProbeTarget.group)).filter(ProbeTarget.id == target_id).first()
                 if not target or target.paused:
                     break
 
-                interval = target.interval
+                in_silent = self._is_in_silent_window(target)
+                current_interval = self._get_effective_interval(target)
+                next_probe_at = datetime.utcnow() + timedelta(seconds=current_interval)
+
+                self._notify_status_change(target, current_interval, next_probe_at, in_silent)
+
+                if in_silent:
+                    sleep_duration = self._get_sleep_until_silent_end(target)
+                    await asyncio.sleep(sleep_duration)
+                    continue
 
                 async with self.semaphore:
                     result = await self._execute_probe(target)
@@ -124,12 +135,17 @@ class ProbeEngine:
                     db.refresh(target)
                     self._notify_result(target, result)
 
+                    new_interval = self._get_effective_interval(target)
+                    new_next_probe = datetime.utcnow() + timedelta(seconds=new_interval)
+                    self._notify_status_change(target, new_interval, new_next_probe, False)
+
             except Exception as e:
                 print(f"Probe error for target {target_id}: {e}")
             finally:
                 db.close()
 
-            await asyncio.sleep(interval)
+            current_interval = self._get_cached_interval(target_id)
+            await asyncio.sleep(current_interval if current_interval else target.interval)
 
     async def _execute_probe(self, target: ProbeTarget) -> dict:
         start_time = time.time()
@@ -257,7 +273,8 @@ class ProbeEngine:
             db.add(alert)
             db.flush()
 
-            if not target.silenced:
+            in_silent = self._is_in_silent_window(target)
+            if not target.silenced and not in_silent:
                 self._notify_alert(target, alert)
 
         self._notify_status_change(target)
@@ -285,6 +302,109 @@ class ProbeEngine:
             "success": success_threshold
         }
 
+    def _get_effective_strategy(self, target: ProbeTarget) -> dict:
+        adaptive_enabled = False
+        slow_interval = 60
+        fast_interval = 5
+        silent_start = None
+        silent_end = None
+
+        if target.group:
+            adaptive_enabled = target.group.adaptive_enabled or False
+            slow_interval = target.group.slow_interval or 60
+            fast_interval = target.group.fast_interval or 5
+            silent_start = target.group.silent_start
+            silent_end = target.group.silent_end
+
+        if target.adaptive_enabled is not None:
+            adaptive_enabled = target.adaptive_enabled
+        if target.slow_interval is not None:
+            slow_interval = target.slow_interval
+        if target.fast_interval is not None:
+            fast_interval = target.fast_interval
+        if target.silent_start is not None:
+            silent_start = target.silent_start
+        if target.silent_end is not None:
+            silent_end = target.silent_end
+
+        return {
+            "adaptive_enabled": adaptive_enabled,
+            "slow_interval": slow_interval,
+            "fast_interval": fast_interval,
+            "silent_start": silent_start,
+            "silent_end": silent_end
+        }
+
+    def _is_in_silent_window(self, target: ProbeTarget) -> bool:
+        strategy = self._get_effective_strategy(target)
+        silent_start = strategy["silent_start"]
+        silent_end = strategy["silent_end"]
+
+        if not silent_start or not silent_end:
+            return False
+
+        try:
+            now = datetime.utcnow()
+            current_time = now.strftime("%H:%M")
+
+            start_h, start_m = map(int, silent_start.split(":"))
+            end_h, end_m = map(int, silent_end.split(":"))
+            now_h, now_m = now.hour, now.minute
+
+            start_total = start_h * 60 + start_m
+            end_total = end_h * 60 + end_m
+            now_total = now_h * 60 + now_m
+
+            if start_total <= end_total:
+                return start_total <= now_total <= end_total
+            else:
+                return now_total >= start_total or now_total <= end_total
+        except Exception:
+            return False
+
+    def _get_sleep_until_silent_end(self, target: ProbeTarget) -> int:
+        strategy = self._get_effective_strategy(target)
+        silent_end = strategy["silent_end"]
+
+        if not silent_end:
+            return 60
+
+        try:
+            now = datetime.utcnow()
+            end_h, end_m = map(int, silent_end.split(":"))
+
+            end_time = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+            if end_time <= now:
+                end_time += timedelta(days=1)
+
+            sleep_seconds = (end_time - now).total_seconds()
+            return max(1, int(sleep_seconds))
+        except Exception:
+            return 60
+
+    def _get_effective_interval(self, target: ProbeTarget) -> int:
+        strategy = self._get_effective_strategy(target)
+
+        if not strategy["adaptive_enabled"]:
+            interval = target.interval
+            self._interval_cache[target.id] = interval
+            return interval
+
+        status = target.status
+
+        if status == "healthy" and target.consecutive_failures == 0:
+            interval = strategy["slow_interval"]
+        elif status == "down":
+            interval = strategy["slow_interval"]
+        else:
+            interval = strategy["fast_interval"]
+
+        self._interval_cache[target.id] = interval
+        return interval
+
+    def _get_cached_interval(self, target_id: int) -> Optional[int]:
+        return self._interval_cache.get(target_id)
+
     def _calculate_status(self, target: ProbeTarget, current_status: str) -> str:
         thresholds = self._get_effective_thresholds(target)
 
@@ -307,7 +427,14 @@ class ProbeEngine:
 
         return current_status
 
-    def _notify_status_change(self, target: ProbeTarget):
+    def _notify_status_change(self, target: ProbeTarget, current_interval: int = None, next_probe_at: datetime = None, in_silent_window: bool = False):
+        if current_interval is None:
+            current_interval = self._get_effective_interval(target)
+        if next_probe_at is None:
+            next_probe_at = datetime.utcnow() + timedelta(seconds=current_interval)
+
+        strategy = self._get_effective_strategy(target)
+
         data = {
             "type": "status_update",
             "target": {
@@ -320,7 +447,16 @@ class ProbeEngine:
                 "silenced": target.silenced,
                 "consecutive_failures": target.consecutive_failures,
                 "consecutive_successes": target.consecutive_successes,
-                "last_check": target.last_check.isoformat() if target.last_check else None
+                "last_check": target.last_check.isoformat() if target.last_check else None,
+                "interval": target.interval,
+                "adaptive_enabled": strategy["adaptive_enabled"],
+                "slow_interval": strategy["slow_interval"],
+                "fast_interval": strategy["fast_interval"],
+                "silent_start": strategy["silent_start"],
+                "silent_end": strategy["silent_end"],
+                "current_interval": current_interval,
+                "next_probe_at": next_probe_at.isoformat(),
+                "in_silent_window": in_silent_window
             }
         }
         for callback in self.status_callbacks:

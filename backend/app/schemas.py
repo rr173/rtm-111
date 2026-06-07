@@ -10,6 +10,11 @@ class ProbeGroupCreate(BaseModel):
     degrade_threshold: Optional[int] = Field(2, ge=1, le=100)
     down_threshold: Optional[int] = Field(5, ge=1, le=100)
     success_threshold: Optional[int] = Field(3, ge=1, le=100)
+    adaptive_enabled: Optional[bool] = False
+    slow_interval: Optional[int] = Field(60, ge=5, le=600)
+    fast_interval: Optional[int] = Field(5, ge=1, le=120)
+    silent_start: Optional[str] = None
+    silent_end: Optional[str] = None
 
 
 class ProbeGroupUpdate(BaseModel):
@@ -19,6 +24,11 @@ class ProbeGroupUpdate(BaseModel):
     degrade_threshold: Optional[int] = Field(None, ge=1, le=100)
     down_threshold: Optional[int] = Field(None, ge=1, le=100)
     success_threshold: Optional[int] = Field(None, ge=1, le=100)
+    adaptive_enabled: Optional[bool] = None
+    slow_interval: Optional[int] = Field(None, ge=5, le=600)
+    fast_interval: Optional[int] = Field(None, ge=1, le=120)
+    silent_start: Optional[str] = None
+    silent_end: Optional[str] = None
 
 
 class ProbeGroupResponse(BaseModel):
@@ -29,6 +39,11 @@ class ProbeGroupResponse(BaseModel):
     degrade_threshold: int
     down_threshold: int
     success_threshold: int
+    adaptive_enabled: bool
+    slow_interval: int
+    fast_interval: int
+    silent_start: Optional[str] = None
+    silent_end: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -47,6 +62,11 @@ class ProbeTargetCreate(BaseModel):
     degrade_threshold: Optional[int] = Field(None, ge=1, le=100)
     down_threshold: Optional[int] = Field(None, ge=1, le=100)
     success_threshold: Optional[int] = Field(None, ge=1, le=100)
+    adaptive_enabled: Optional[bool] = False
+    slow_interval: Optional[int] = Field(60, ge=5, le=600)
+    fast_interval: Optional[int] = Field(5, ge=1, le=120)
+    silent_start: Optional[str] = None
+    silent_end: Optional[str] = None
 
 
 class ProbeTargetUpdate(BaseModel):
@@ -62,6 +82,11 @@ class ProbeTargetUpdate(BaseModel):
     degrade_threshold: Optional[int] = Field(None, ge=1, le=100)
     down_threshold: Optional[int] = Field(None, ge=1, le=100)
     success_threshold: Optional[int] = Field(None, ge=1, le=100)
+    adaptive_enabled: Optional[bool] = None
+    slow_interval: Optional[int] = Field(None, ge=5, le=600)
+    fast_interval: Optional[int] = Field(None, ge=1, le=120)
+    silent_start: Optional[str] = None
+    silent_end: Optional[str] = None
 
 
 class ProbeTargetResponse(BaseModel):
@@ -82,6 +107,14 @@ class ProbeTargetResponse(BaseModel):
     degrade_threshold: Optional[int] = None
     down_threshold: Optional[int] = None
     success_threshold: Optional[int] = None
+    adaptive_enabled: bool
+    slow_interval: int
+    fast_interval: int
+    silent_start: Optional[str] = None
+    silent_end: Optional[str] = None
+    current_interval: Optional[int] = None
+    next_probe_at: Optional[datetime] = None
+    in_silent_window: Optional[bool] = None
     created_at: datetime
 
     class Config:
