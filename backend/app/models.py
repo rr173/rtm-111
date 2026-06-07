@@ -17,7 +17,7 @@ class ProbeGroup(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    targets = relationship("ProbeTarget", back_populates="group", cascade="all, delete-orphan")
+    targets = relationship("ProbeTarget", back_populates="group")
 
 
 class ProbeTarget(Base):

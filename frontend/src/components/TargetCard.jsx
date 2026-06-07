@@ -4,9 +4,10 @@ import LatencyChart from './LatencyChart';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
-function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause, onToggleSilence, detailData }) {
+function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause, onToggleSilence, detailData, groups = [], onGroupChange }) {
   const [historyData, setHistoryData] = useState(null);
   const [alertsHistory, setAlertsHistory] = useState([]);
+  const [selectedGroupId, setSelectedGroupId] = useState(target.group_id || '');
 
   useEffect(() => {
     if (expanded) {
@@ -56,6 +57,24 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
     if (!isoString) return '—';
     const d = new Date(isoString);
     return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  };
+
+  const handleGroupChange = async (e) => {
+    const newGroupId = e.target.value === '' ? null : Number(e.target.value);
+    setSelectedGroupId(e.target.value);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/targets/${target.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_id: newGroupId })
+      });
+      if (res.ok && onGroupChange) {
+        onGroupChange(target.id, newGroupId);
+      }
+    } catch (e) {
+      console.error('Failed to update target group:', e);
+    }
   };
 
   return (
@@ -171,12 +190,52 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
 
           <div className="detail-section">
             <h3>ℹ️ 目标详情</h3>
-            <div style={{ fontSize: '13px', color: '#94a3b8', lineHeight: '1.8' }}>
-              <div>探测间隔: {target.interval} 秒</div>
-              <div>超时时间: {target.timeout} 秒</div>
-              <div>连续失败: {target.consecutive_failures} 次</div>
-              <div>连续成功: {target.consecutive_successes} 次</div>
-              <div>最后探测: {formatTime(target.last_check)}</div>
+            <div style={{ fontSize: '13px', color: '#94a3b8', lineHeight: '2' }}>
+              <div className="detail-row">
+                <span className="detail-label">所属分组:</span>
+                <span className="detail-value">
+                  <select
+                    value={selectedGroupId}
+                    onChange={handleGroupChange}
+                    style={{
+                      background: '#0f172a',
+                      border: '1px solid #475569',
+                      color: '#e2e8f0',
+                      padding: '4px 8px',
+                      borderRadius: '4px',
+                      fontSize: '13px',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <option value="">未分组</option>
+                    {groups.map(g => (
+                      <option key={g.id} value={g.id}>
+                        {g.name}
+                      </option>
+                    ))}
+                  </select>
+                </span>
+              </div>
+              <div className="detail-row">
+                <span className="detail-label">探测间隔:</span>
+                <span className="detail-value">{target.interval} 秒</span>
+              </div>
+              <div className="detail-row">
+                <span className="detail-label">超时时间:</span>
+                <span className="detail-value">{target.timeout} 秒</span>
+              </div>
+              <div className="detail-row">
+                <span className="detail-label">连续失败:</span>
+                <span className="detail-value">{target.consecutive_failures} 次</span>
+              </div>
+              <div className="detail-row">
+                <span className="detail-label">连续成功:</span>
+                <span className="detail-value">{target.consecutive_successes} 次</span>
+              </div>
+              <div className="detail-row">
+                <span className="detail-label">最后探测:</span>
+                <span className="detail-value">{formatTime(target.last_check)}</span>
+              </div>
             </div>
           </div>
         </div>

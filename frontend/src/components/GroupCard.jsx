@@ -6,6 +6,7 @@ const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 function GroupCard({
   group,
   targets,
+  allGroups = [],
   expandedTarget,
   onToggleExpand,
   onDeleteTarget,
@@ -13,7 +14,8 @@ function GroupCard({
   onToggleSilence,
   detailData,
   onRefreshGroups,
-  onRefreshTargets
+  onRefreshTargets,
+  onTargetGroupChange
 }) {
   const [expanded, setExpanded] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
@@ -211,6 +213,8 @@ function GroupCard({
               <TargetCard
                 key={target.id}
                 target={target}
+                groups={allGroups}
+                onGroupChange={onTargetGroupChange}
                 expanded={expandedTarget === target.id}
                 onToggleExpand={() => onToggleExpand(expandedTarget === target.id ? null : target.id)}
                 onDelete={onDeleteTarget}

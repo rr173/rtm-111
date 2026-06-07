@@ -863,3 +863,24 @@ body {
 .btn-secondary.danger:hover {
   background-color: rgba(239, 68, 68, 0.1);
 }
+
+.detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.detail-label {
+  color: #64748b;
+}
+
+.detail-val {
+  color: #e2e8f0;
+  font-weight: 500;
+}
+
+.detail-value {
+  color: #e2e8f0;
+  font-weight: 500;
+}

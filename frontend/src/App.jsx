@@ -123,6 +123,12 @@ function App() {
     }
   };
 
+  const handleTargetGroupChange = useCallback((targetId, newGroupId) => {
+    setTargets(prev => prev.map(t =>
+      t.id === targetId ? { ...t, group_id: newGroupId } : t
+    ));
+  }, [setTargets]);
+
   const acknowledgeAlert = async (alertId, acknowledged) => {
     try {
       const res = await fetch(`${API_BASE}/api/alerts/${alertId}/acknowledge`, {
@@ -172,6 +178,7 @@ function App() {
             detailData={detailData}
             onRefreshGroups={refreshGroups}
             onRefreshTargets={refreshTargets}
+            onTargetGroupChange={handleTargetGroupChange}
           />
         </div>
 

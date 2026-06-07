@@ -279,8 +279,21 @@ def update_group(group_id: int, group_update: ProbeGroupUpdate, db: Session = De
         raise HTTPException(status_code=404, detail="Group not found")
 
     update_data = group_update.model_dump(exclude_unset=True)
+
+    threshold_fields = ["degrade_threshold", "down_threshold", "success_threshold"]
+    has_threshold_change = any(field in update_data for field in threshold_fields)
+
     for key, value in update_data.items():
         setattr(group, key, value)
+
+    if has_threshold_change:
+        for target in group.targets:
+            if "degrade_threshold" in update_data:
+                target.degrade_threshold = group.degrade_threshold
+            if "down_threshold" in update_data:
+                target.down_threshold = group.down_threshold
+            if "success_threshold" in update_data:
+                target.success_threshold = group.success_threshold
 
     db.commit()
     db.refresh(group)

@@ -12,7 +12,8 @@ function TargetList({
   onToggleSilence,
   detailData,
   onRefreshGroups,
-  onRefreshTargets
+  onRefreshTargets,
+  onTargetGroupChange
 }) {
   const groupedTargets = useMemo(() => {
     const result = {};
@@ -81,6 +82,7 @@ function TargetList({
           key={group.id}
           group={group}
           targets={groupedTargets[group.id] || []}
+          allGroups={groups}
           expandedTarget={expandedTarget}
           onToggleExpand={onToggleExpand}
           onDeleteTarget={onDelete}
@@ -89,6 +91,7 @@ function TargetList({
           detailData={detailData}
           onRefreshGroups={onRefreshGroups}
           onRefreshTargets={onRefreshTargets}
+          onTargetGroupChange={onTargetGroupChange}
         />
       ))}
 
@@ -113,6 +116,8 @@ function TargetList({
               <TargetCard
                 key={target.id}
                 target={target}
+                groups={groups}
+                onGroupChange={onTargetGroupChange}
                 expanded={expandedTarget === target.id}
                 onToggleExpand={() => onToggleExpand(expandedTarget === target.id ? null : target.id)}
                 onDelete={onDelete}
