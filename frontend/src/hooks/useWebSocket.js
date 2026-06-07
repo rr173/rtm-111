@@ -36,12 +36,12 @@ export function useWebSocket() {
     if (apiBase) {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       wsUrl = apiBase.replace(/^https?:/, protocol).replace(/^ws:/, protocol).replace(/^wss:/, protocol);
-      if (!wsUrl.endsWith('/ws')) {
-        wsUrl = wsUrl.replace(/\/$/, '') + '/ws';
+      if (!wsUrl.endsWith('/api/ws')) {
+        wsUrl = wsUrl.replace(/\/$/, '') + '/api/ws';
       }
     } else {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      wsUrl = `${protocol}//${window.location.host}/ws`;
+      wsUrl = `${protocol}//${window.location.host}/api/ws`;
     }
 
     console.log('Connecting WebSocket:', wsUrl);

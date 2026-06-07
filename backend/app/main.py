@@ -312,7 +312,7 @@ def acknowledge_alert(alert_id: int, ack: AlertAcknowledge, db: Session = Depend
     return {"message": "Alert updated"}
 
 
-@app.websocket("/ws")
+@app.websocket("/api/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
