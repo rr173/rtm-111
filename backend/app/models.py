@@ -4,10 +4,27 @@ from datetime import datetime
 from .database import Base
 
 
+class ProbeGroup(Base):
+    __tablename__ = "probe_groups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(String(512), nullable=True)
+    color = Column(String(20), default="#3b82f6")
+    degrade_threshold = Column(Integer, default=2)
+    down_threshold = Column(Integer, default=5)
+    success_threshold = Column(Integer, default=3)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    targets = relationship("ProbeTarget", back_populates="group", cascade="all, delete-orphan")
+
+
 class ProbeTarget(Base):
     __tablename__ = "probe_targets"
 
     id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("probe_groups.id"), nullable=True)
     name = Column(String(255), nullable=False)
     type = Column(String(10), nullable=False)
     address = Column(String(512), nullable=False)
@@ -20,9 +37,13 @@ class ProbeTarget(Base):
     consecutive_failures = Column(Integer, default=0)
     consecutive_successes = Column(Integer, default=0)
     last_check = Column(DateTime, nullable=True)
+    degrade_threshold = Column(Integer, nullable=True)
+    down_threshold = Column(Integer, nullable=True)
+    success_threshold = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    group = relationship("ProbeGroup", back_populates="targets")
     results = relationship("ProbeResult", back_populates="target", cascade="all, delete-orphan")
     alerts = relationship("Alert", back_populates="target", cascade="all, delete-orphan")
 

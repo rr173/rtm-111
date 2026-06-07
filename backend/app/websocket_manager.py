@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal
-from .models import ProbeTarget, Alert, ProbeResult
+from .models import ProbeTarget, Alert, ProbeResult, ProbeGroup
 from .probe_engine import probe_engine
 
 
@@ -34,10 +34,26 @@ class ConnectionManager:
     def disconnect(self, websocket: WebSocket):
         self.active_connections.discard(websocket)
 
+    def _calculate_group_status(self, targets: list) -> str:
+        active_targets = [t for t in targets if not t.paused]
+        if not active_targets:
+            return "paused"
+
+        has_down = any(t.status == "down" for t in active_targets)
+        has_degraded = any(t.status == "degraded" for t in active_targets)
+
+        if has_down:
+            return "down"
+        elif has_degraded:
+            return "degraded"
+        else:
+            return "healthy"
+
     async def _send_snapshot(self, websocket: WebSocket):
         db = SessionLocal()
         try:
             targets = db.query(ProbeTarget).all()
+            groups = db.query(ProbeGroup).all()
             alerts = db.query(Alert).order_by(Alert.timestamp.desc()).limit(100).all()
 
             targets_data = []
@@ -57,6 +73,7 @@ class ConnectionManager:
 
                 targets_data.append({
                     "id": t.id,
+                    "group_id": t.group_id,
                     "name": t.name,
                     "type": t.type,
                     "address": t.address,
@@ -70,7 +87,31 @@ class ConnectionManager:
                     "consecutive_successes": t.consecutive_successes,
                     "last_check": t.last_check.isoformat() if t.last_check else None,
                     "created_at": t.created_at.isoformat(),
+                    "degrade_threshold": t.degrade_threshold,
+                    "down_threshold": t.down_threshold,
+                    "success_threshold": t.success_threshold,
                     "recent_results": results_data
+                })
+
+            groups_data = []
+            for g in groups:
+                group_targets = [t for t in targets if t.group_id == g.id]
+                groups_data.append({
+                    "id": g.id,
+                    "name": g.name,
+                    "description": g.description,
+                    "color": g.color,
+                    "degrade_threshold": g.degrade_threshold,
+                    "down_threshold": g.down_threshold,
+                    "success_threshold": g.success_threshold,
+                    "status": self._calculate_group_status(group_targets),
+                    "target_count": len(group_targets),
+                    "paused_count": sum(1 for t in group_targets if t.paused),
+                    "healthy_count": sum(1 for t in group_targets if t.status == "healthy" and not t.paused),
+                    "degraded_count": sum(1 for t in group_targets if t.status == "degraded" and not t.paused),
+                    "down_count": sum(1 for t in group_targets if t.status == "down" and not t.paused),
+                    "created_at": g.created_at.isoformat(),
+                    "updated_at": g.updated_at.isoformat()
                 })
 
             alerts_data = []
@@ -88,6 +129,7 @@ class ConnectionManager:
             snapshot = {
                 "type": "snapshot",
                 "targets": targets_data,
+                "groups": groups_data,
                 "alerts": alerts_data
             }
             await websocket.send_json(snapshot)

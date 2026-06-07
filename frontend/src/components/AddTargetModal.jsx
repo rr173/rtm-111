@@ -1,10 +1,11 @@
 import { useState } from 'react';
 
-function AddTargetModal({ onClose, onSubmit }) {
+function AddTargetModal({ onClose, onSubmit, groups = [] }) {
   const [formData, setFormData] = useState({
     name: '',
     type: 'http',
     address: '',
+    group_id: '',
     interval: 30,
     timeout: 5,
     expected_status: '200'
@@ -12,9 +13,15 @@ function AddTargetModal({ onClose, onSubmit }) {
 
   const handleChange = (e) => {
     const { name, value } = e.target;
+    let parsedValue = value;
+    if (name === 'interval' || name === 'timeout') {
+      parsedValue = Number(value);
+    } else if (name === 'group_id') {
+      parsedValue = value === '' ? null : Number(value);
+    }
     setFormData(prev => ({
       ...prev,
-      [name]: name === 'interval' || name === 'timeout' ? Number(value) : value
+      [name]: parsedValue
     }));
   };
 
@@ -25,6 +32,9 @@ function AddTargetModal({ onClose, onSubmit }) {
     const data = { ...formData };
     if (formData.type === 'tcp') {
       delete data.expected_status;
+    }
+    if (data.group_id === null) {
+      delete data.group_id;
     }
     onSubmit(data);
   };
@@ -45,6 +55,24 @@ function AddTargetModal({ onClose, onSubmit }) {
               required
             />
           </div>
+
+          {groups.length > 0 && (
+            <div className="form-group">
+              <label>所属分组</label>
+              <select
+                name="group_id"
+                value={formData.group_id === null ? '' : formData.group_id}
+                onChange={handleChange}
+              >
+                <option value="">未分组</option>
+                {groups.map(group => (
+                  <option key={group.id} value={group.id}>
+                    {group.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <div className="form-row">
             <div className="form-group">

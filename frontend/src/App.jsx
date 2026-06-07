@@ -1,17 +1,43 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useWebSocket } from './hooks/useWebSocket';
 import StatsBar from './components/StatsBar';
 import TargetList from './components/TargetList';
 import AlertPanel from './components/AlertPanel';
 import AddTargetModal from './components/AddTargetModal';
+import AddGroupModal from './components/AddGroupModal';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
 function App() {
-  const { connected, targets, alerts, setTargets, setAlerts } = useWebSocket();
+  const { connected, targets, groups, alerts, setTargets, setGroups, setAlerts, loadInitialData } = useWebSocket();
   const [expandedTarget, setExpandedTarget] = useState(null);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showAddGroupModal, setShowAddGroupModal] = useState(false);
   const [detailData, setDetailData] = useState({});
+
+  const refreshGroups = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/groups`);
+      if (res.ok) {
+        const data = await res.json();
+        setGroups(data);
+      }
+    } catch (e) {
+      console.error('Failed to refresh groups:', e);
+    }
+  }, [setGroups]);
+
+  const refreshTargets = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/targets`);
+      if (res.ok) {
+        const data = await res.json();
+        setTargets(data);
+      }
+    } catch (e) {
+      console.error('Failed to refresh targets:', e);
+    }
+  }, [setTargets]);
 
   useEffect(() => {
     if (expandedTarget) {
@@ -137,12 +163,15 @@ function App() {
           />
           <TargetList
             targets={targets}
+            groups={groups}
             expandedTarget={expandedTarget}
             onToggleExpand={setExpandedTarget}
             onDelete={deleteTarget}
             onTogglePause={togglePause}
             onToggleSilence={toggleSilence}
             detailData={detailData}
+            onRefreshGroups={refreshGroups}
+            onRefreshTargets={refreshTargets}
           />
         </div>
 
@@ -154,14 +183,29 @@ function App() {
         </div>
       </div>
 
-      <button className="add-target-btn" onClick={() => setShowAddModal(true)}>
-        +
-      </button>
+      <div className="fab-container">
+        <button className="add-group-btn" onClick={() => setShowAddGroupModal(true)}>
+          + 分组
+        </button>
+        <button className="add-target-btn" onClick={() => setShowAddModal(true)}>
+          + 目标
+        </button>
+      </div>
 
       {showAddModal && (
         <AddTargetModal
           onClose={() => setShowAddModal(false)}
           onSubmit={addTarget}
+          groups={groups}
+        />
+      )}
+
+      {showAddGroupModal && (
+        <AddGroupModal
+          onClose={() => setShowAddGroupModal(false)}
+          onSubmit={(newGroup) => {
+            setGroups(prev => [...prev, newGroup]);
+          }}
         />
       )}
     </div>

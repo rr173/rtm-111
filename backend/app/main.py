@@ -5,10 +5,12 @@ from typing import List
 from datetime import datetime, timedelta
 
 from .database import engine, get_db, Base
-from .models import ProbeTarget, ProbeResult, Alert
+from .models import ProbeTarget, ProbeResult, Alert, ProbeGroup
 from .schemas import (
     ProbeTargetCreate, ProbeTargetUpdate, ProbeTargetResponse,
-    ProbeResultResponse, AlertResponse, AlertAcknowledge
+    ProbeResultResponse, AlertResponse, AlertAcknowledge,
+    ProbeGroupCreate, ProbeGroupUpdate, ProbeGroupResponse,
+    ProbeGroupWithTargetsResponse
 )
 from .probe_engine import probe_engine
 from .websocket_manager import manager, get_target_history
@@ -44,14 +46,49 @@ async def shutdown_event():
 def _init_demo_data():
     db = next(get_db())
     try:
-        count = db.query(ProbeTarget).count()
-        if count > 0:
+        target_count = db.query(ProbeTarget).count()
+        group_count = db.query(ProbeGroup).count()
+        if target_count > 0 and group_count > 0:
             return
 
         now = datetime.utcnow()
 
+        group1 = ProbeGroup(
+            name="生产环境",
+            description="核心业务线生产环境服务",
+            color="#ef4444",
+            degrade_threshold=3,
+            down_threshold=8,
+            success_threshold=3
+        )
+        db.add(group1)
+        db.flush()
+
+        group2 = ProbeGroup(
+            name="测试环境",
+            description="测试环境服务，容忍度较高",
+            color="#22c55e",
+            degrade_threshold=5,
+            down_threshold=10,
+            success_threshold=2
+        )
+        db.add(group2)
+        db.flush()
+
+        group3 = ProbeGroup(
+            name="内部工具",
+            description="内部工具和第三方依赖",
+            color="#3b82f6",
+            degrade_threshold=2,
+            down_threshold=5,
+            success_threshold=3
+        )
+        db.add(group3)
+        db.flush()
+
         target1 = ProbeTarget(
             name="示例服务-健康",
+            group_id=group1.id,
             type="http",
             address="https://httpbin.org/status/200",
             interval=10,
@@ -67,6 +104,7 @@ def _init_demo_data():
 
         target2 = ProbeTarget(
             name="示例服务-间歇故障",
+            group_id=group1.id,
             type="http",
             address="https://httpbin.org/status/200,500",
             interval=8,
@@ -82,6 +120,7 @@ def _init_demo_data():
 
         target3 = ProbeTarget(
             name="示例服务-不可达",
+            group_id=group2.id,
             type="tcp",
             address="192.0.2.1:9999",
             interval=15,
@@ -93,6 +132,38 @@ def _init_demo_data():
             last_check=now
         )
         db.add(target3)
+        db.flush()
+
+        target4 = ProbeTarget(
+            name="测试环境-API网关",
+            group_id=group2.id,
+            type="http",
+            address="https://httpbin.org/status/200",
+            interval=12,
+            timeout=5,
+            expected_status="200",
+            status="healthy",
+            consecutive_successes=5,
+            consecutive_failures=0,
+            last_check=now
+        )
+        db.add(target4)
+        db.flush()
+
+        target5 = ProbeTarget(
+            name="内部文档服务",
+            group_id=group3.id,
+            type="http",
+            address="https://httpbin.org/status/200",
+            interval=30,
+            timeout=10,
+            expected_status="200",
+            status="healthy",
+            consecutive_successes=100,
+            consecutive_failures=0,
+            last_check=now
+        )
+        db.add(target5)
         db.flush()
 
         for i in range(20):
@@ -125,6 +196,28 @@ def _init_demo_data():
                 error_message="Connection timeout"
             ))
 
+        for i in range(20):
+            t = now - timedelta(minutes=i * 2)
+            success = True
+            db.add(ProbeResult(
+                target_id=target4.id,
+                timestamp=t,
+                success=success,
+                latency_ms=120 + i * 1.5 + (i % 4) * 8,
+                error_message=None
+            ))
+
+        for i in range(20):
+            t = now - timedelta(minutes=i * 2)
+            success = i % 10 != 0
+            db.add(ProbeResult(
+                target_id=target5.id,
+                timestamp=t,
+                success=success,
+                latency_ms=200 + i * 2 if success else None,
+                error_message=None if success else "Service temporarily unavailable"
+            ))
+
         db.add(Alert(
             target_id=target2.id,
             timestamp=now - timedelta(minutes=30),
@@ -154,6 +247,131 @@ def _init_demo_data():
         db.rollback()
     finally:
         db.close()
+
+
+@app.get("/api/groups", response_model=List[ProbeGroupResponse])
+def list_groups(db: Session = Depends(get_db)):
+    groups = db.query(ProbeGroup).order_by(ProbeGroup.id.asc()).all()
+    return groups
+
+
+@app.get("/api/groups/{group_id}", response_model=ProbeGroupWithTargetsResponse)
+def get_group(group_id: int, db: Session = Depends(get_db)):
+    group = db.query(ProbeGroup).filter(ProbeGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    return group
+
+
+@app.post("/api/groups", response_model=ProbeGroupResponse)
+def create_group(group: ProbeGroupCreate, db: Session = Depends(get_db)):
+    db_group = ProbeGroup(**group.model_dump())
+    db.add(db_group)
+    db.commit()
+    db.refresh(db_group)
+    return db_group
+
+
+@app.put("/api/groups/{group_id}", response_model=ProbeGroupResponse)
+def update_group(group_id: int, group_update: ProbeGroupUpdate, db: Session = Depends(get_db)):
+    group = db.query(ProbeGroup).filter(ProbeGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    update_data = group_update.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(group, key, value)
+
+    db.commit()
+    db.refresh(group)
+    return group
+
+
+@app.delete("/api/groups/{group_id}")
+def delete_group(group_id: int, db: Session = Depends(get_db)):
+    group = db.query(ProbeGroup).filter(ProbeGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    for target in group.targets:
+        target.group_id = None
+        probe_engine.remove_target(target.id)
+        probe_engine.add_target(target.id)
+
+    db.delete(group)
+    db.commit()
+    return {"message": "Group deleted"}
+
+
+@app.post("/api/groups/{group_id}/pause")
+def pause_group(group_id: int, db: Session = Depends(get_db)):
+    group = db.query(ProbeGroup).filter(ProbeGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    for target in group.targets:
+        if not target.paused:
+            target.paused = True
+            probe_engine.toggle_target(target.id, True)
+
+    db.commit()
+    return {"message": "Group paused"}
+
+
+@app.post("/api/groups/{group_id}/resume")
+def resume_group(group_id: int, db: Session = Depends(get_db)):
+    group = db.query(ProbeGroup).filter(ProbeGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    for target in group.targets:
+        if target.paused:
+            target.paused = False
+            probe_engine.toggle_target(target.id, False)
+
+    db.commit()
+    return {"message": "Group resumed"}
+
+
+@app.post("/api/groups/{group_id}/silence")
+def silence_group(group_id: int, db: Session = Depends(get_db)):
+    group = db.query(ProbeGroup).filter(ProbeGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    for target in group.targets:
+        target.silenced = True
+
+    db.commit()
+    return {"message": "Group silenced"}
+
+
+@app.post("/api/groups/{group_id}/unsilence")
+def unsilence_group(group_id: int, db: Session = Depends(get_db)):
+    group = db.query(ProbeGroup).filter(ProbeGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    for target in group.targets:
+        target.silenced = False
+
+    db.commit()
+    return {"message": "Group unsilenced"}
+
+
+@app.post("/api/groups/{group_id}/apply-thresholds")
+def apply_group_thresholds(group_id: int, db: Session = Depends(get_db)):
+    group = db.query(ProbeGroup).filter(ProbeGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    for target in group.targets:
+        target.degrade_threshold = group.degrade_threshold
+        target.down_threshold = group.down_threshold
+        target.success_threshold = group.success_threshold
+
+    db.commit()
+    return {"message": "Thresholds applied to all targets in group"}
 
 
 @app.get("/api/targets", response_model=List[ProbeTargetResponse])

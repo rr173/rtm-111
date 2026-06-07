@@ -3,6 +3,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 export function useWebSocket() {
   const [connected, setConnected] = useState(false);
   const [targets, setTargets] = useState([]);
+  const [groups, setGroups] = useState([]);
   const [alerts, setAlerts] = useState([]);
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
@@ -12,16 +13,19 @@ export function useWebSocket() {
   const loadInitialData = useCallback(async () => {
     try {
       const apiBase = import.meta.env.VITE_API_HTTP_URL || '';
-      const [targetsRes, alertsRes] = await Promise.all([
+      const [targetsRes, groupsRes, alertsRes] = await Promise.all([
         fetch(`${apiBase}/api/targets`),
+        fetch(`${apiBase}/api/groups`),
         fetch(`${apiBase}/api/alerts?limit=50`)
       ]);
-      if (targetsRes.ok && alertsRes.ok) {
-        const [targetsData, alertsData] = await Promise.all([
+      if (targetsRes.ok && groupsRes.ok && alertsRes.ok) {
+        const [targetsData, groupsData, alertsData] = await Promise.all([
           targetsRes.json(),
+          groupsRes.json(),
           alertsRes.json()
         ]);
         setTargets(targetsData);
+        setGroups(groupsData);
         setAlerts(alertsData.reverse());
       }
     } catch (e) {
@@ -61,6 +65,7 @@ export function useWebSocket() {
 
         if (data.type === 'snapshot') {
           setTargets(data.targets || []);
+          setGroups(data.groups || []);
           setAlerts(prevAlerts => {
             const snapshotAlerts = data.alerts || [];
             const merged = new Map();
@@ -167,6 +172,10 @@ export function useWebSocket() {
     setTargets(newTargets);
   }, []);
 
+  const setGroupsData = useCallback((newGroups) => {
+    setGroups(newGroups);
+  }, []);
+
   const setAlertsData = useCallback((newAlerts) => {
     setAlerts(newAlerts);
   }, []);
@@ -174,9 +183,11 @@ export function useWebSocket() {
   return {
     connected,
     targets,
+    groups,
     alerts,
     getResults,
     setTargets: setTargetsData,
+    setGroups: setGroupsData,
     setAlerts: setAlertsData,
     loadInitialData
   };

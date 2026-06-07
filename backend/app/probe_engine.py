@@ -262,19 +262,44 @@ class ProbeEngine:
 
         self._notify_status_change(target)
 
+    def _get_effective_thresholds(self, target: ProbeTarget) -> dict:
+        degrade_threshold = 2
+        down_threshold = 5
+        success_threshold = 3
+
+        if target.group:
+            degrade_threshold = target.group.degrade_threshold or 2
+            down_threshold = target.group.down_threshold or 5
+            success_threshold = target.group.success_threshold or 3
+
+        if target.degrade_threshold is not None:
+            degrade_threshold = target.degrade_threshold
+        if target.down_threshold is not None:
+            down_threshold = target.down_threshold
+        if target.success_threshold is not None:
+            success_threshold = target.success_threshold
+
+        return {
+            "degrade": degrade_threshold,
+            "down": down_threshold,
+            "success": success_threshold
+        }
+
     def _calculate_status(self, target: ProbeTarget, current_status: str) -> str:
-        if target.consecutive_successes >= 3:
+        thresholds = self._get_effective_thresholds(target)
+
+        if target.consecutive_successes >= thresholds["success"]:
             return "healthy"
 
         if target.consecutive_failures == 0:
             return current_status
 
         if current_status == "healthy":
-            if target.consecutive_failures >= 2:
+            if target.consecutive_failures >= thresholds["degrade"]:
                 return "degraded"
             return current_status
         elif current_status == "degraded":
-            if target.consecutive_failures >= 5:
+            if target.consecutive_failures >= thresholds["down"]:
                 return "down"
             return current_status
         elif current_status == "down":
