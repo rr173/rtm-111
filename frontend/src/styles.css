@@ -950,3 +950,415 @@ body {
 .status-disabled {
   color: #64748b;
 }
+
+.header-tabs {
+  display: flex;
+  gap: 4px;
+  background-color: rgba(15, 23, 42, 0.6);
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid #334155;
+}
+
+.tab-btn {
+  padding: 8px 16px;
+  background: none;
+  border: none;
+  color: #94a3b8;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: all 0.2s;
+}
+
+.tab-btn:hover {
+  color: #e2e8f0;
+  background-color: rgba(71, 85, 105, 0.3);
+}
+
+.tab-btn.active {
+  color: #f1f5f9;
+  background-color: #3b82f6;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+}
+
+.topology-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.topology-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 4px;
+}
+
+.topology-title h2 {
+  font-size: 20px;
+  font-weight: 600;
+  color: #f1f5f9;
+  margin-bottom: 4px;
+}
+
+.topology-subtitle {
+  font-size: 13px;
+  color: #64748b;
+}
+
+.topology-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.topology-stats {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.topo-stat-card {
+  background-color: #1e293b;
+  border-radius: 10px;
+  padding: 14px;
+  border: 1px solid #334155;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: center;
+}
+
+.topo-stat-label {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.topo-stat-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: #f1f5f9;
+}
+
+.topo-stat-card.healthy .topo-stat-value {
+  color: #22c55e;
+}
+
+.topo-stat-card.degraded .topo-stat-value {
+  color: #eab308;
+}
+
+.topo-stat-card.down .topo-stat-value {
+  color: #ef4444;
+}
+
+.topo-stat-card.cascade .topo-stat-value {
+  color: #a855f7;
+}
+
+.topo-stat-card.deps .topo-stat-value {
+  color: #3b82f6;
+}
+
+.simulation-banner {
+  background: linear-gradient(90deg, rgba(249, 115, 22, 0.15) 0%, rgba(249, 115, 22, 0.05) 100%);
+  border: 1px solid rgba(249, 115, 22, 0.3);
+  border-radius: 10px;
+  padding: 14px 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.simulation-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #fdba74;
+  font-size: 14px;
+}
+
+.simulation-icon {
+  font-size: 20px;
+}
+
+.simulation-result {
+  color: #fdba74;
+  font-size: 14px;
+}
+
+.simulation-result strong {
+  color: #f97316;
+  font-size: 18px;
+  margin: 0 4px;
+}
+
+.simulation-names {
+  color: #94a3b8;
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+.topology-graph-wrapper {
+  background-color: #1e293b;
+  border-radius: 12px;
+  border: 1px solid #334155;
+  overflow: hidden;
+}
+
+.topology-graph-container {
+  position: relative;
+  width: 100%;
+}
+
+.topology-legend {
+  display: flex;
+  gap: 20px;
+  padding: 12px 20px;
+  background-color: #0f172a;
+  border-bottom: 1px solid #334155;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.topology-svg {
+  cursor: grab;
+  display: block;
+}
+
+.topology-svg:active {
+  cursor: grabbing;
+}
+
+.topology-node rect {
+  transition: all 0.2s ease;
+}
+
+.topology-node:hover rect {
+  filter: brightness(1.1);
+}
+
+.topology-node.selected rect {
+  stroke-width: 3px;
+}
+
+.node-tooltip {
+  position: absolute;
+  background-color: #1e293b;
+  border: 1px solid #475569;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: #e2e8f0;
+  pointer-events: none;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  top: 80px;
+  right: 20px;
+  min-width: 180px;
+}
+
+.tooltip-name {
+  font-weight: 600;
+  color: #f1f5f9;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.tooltip-status,
+.tooltip-cascade,
+.tooltip-address {
+  color: #94a3b8;
+  margin-bottom: 4px;
+}
+
+.tooltip-cascade {
+  color: #a855f7;
+}
+
+.topology-tips {
+  padding: 10px 16px;
+  background-color: rgba(59, 130, 246, 0.05);
+  border: 1px solid rgba(59, 130, 246, 0.1);
+  border-radius: 8px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.topology-tips strong {
+  color: #94a3b8;
+}
+
+.dependency-modal {
+  width: 600px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.dependency-add-section {
+  background-color: #0f172a;
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 20px;
+  border: 1px solid #334155;
+}
+
+.dependency-add-section h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #f1f5f9;
+  margin-bottom: 6px;
+}
+
+.dependency-add-section .form-hint {
+  margin-bottom: 16px;
+}
+
+.dependency-list-section {
+  margin-bottom: 20px;
+}
+
+.dependency-list-section h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #f1f5f9;
+  margin-bottom: 12px;
+}
+
+.empty-text {
+  color: #64748b;
+  font-size: 13px;
+  text-align: center;
+  padding: 30px;
+  font-style: italic;
+}
+
+.dependency-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.dependency-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background-color: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  transition: all 0.2s;
+}
+
+.dependency-item:hover {
+  border-color: #475569;
+}
+
+.dependency-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+}
+
+.dep-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: #e2e8f0;
+}
+
+.dep-upstream {
+  color: #60a5fa;
+}
+
+.dep-downstream {
+  color: #fbbf24;
+}
+
+.dep-arrow {
+  color: #64748b;
+  font-size: 14px;
+}
+
+.dependency-desc {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+.form-error {
+  color: #f87171;
+  font-size: 12px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background-color: rgba(239, 68, 68, 0.1);
+  border-radius: 6px;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.status-badge.cascade {
+  background-color: rgba(168, 85, 247, 0.15);
+  color: #a855f7;
+}
+
+.cascade-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 10px;
+  background-color: rgba(168, 85, 247, 0.15);
+  color: #a855f7;
+  margin-left: 6px;
+  font-weight: 500;
+}
+
+.cascade-source-info {
+  font-size: 11px;
+  color: #a855f7;
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cascade-source-label {
+  color: #64748b;
+}
+
+.cascade-source-name {
+  font-weight: 500;
+  color: #c084fc;
+}
+
+@media (max-width: 1200px) {
+  .topology-stats {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .topology-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .header-tabs {
+    display: none;
+  }
+}

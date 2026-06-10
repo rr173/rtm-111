@@ -39,6 +39,8 @@ class ProbeTarget(Base):
     paused = Column(Boolean, default=False)
     silenced = Column(Boolean, default=False)
     status = Column(String(20), default="healthy")
+    cascade_affected = Column(Boolean, default=False)
+    cascade_source_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=True)
     consecutive_failures = Column(Integer, default=0)
     consecutive_successes = Column(Integer, default=0)
     last_check = Column(DateTime, nullable=True)
@@ -56,6 +58,40 @@ class ProbeTarget(Base):
     group = relationship("ProbeGroup", back_populates="targets")
     results = relationship("ProbeResult", back_populates="target", cascade="all, delete-orphan")
     alerts = relationship("Alert", back_populates="target", cascade="all, delete-orphan")
+    cascade_source = relationship("ProbeTarget", remote_side=[id], foreign_keys=[cascade_source_id])
+    downstream_dependencies = relationship(
+        "Dependency",
+        foreign_keys="Dependency.upstream_id",
+        back_populates="upstream_target",
+        cascade="all, delete-orphan"
+    )
+    upstream_dependencies = relationship(
+        "Dependency",
+        foreign_keys="Dependency.downstream_id",
+        back_populates="downstream_target",
+        cascade="all, delete-orphan"
+    )
+
+
+class Dependency(Base):
+    __tablename__ = "dependencies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    upstream_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False)
+    downstream_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False)
+    description = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    upstream_target = relationship(
+        "ProbeTarget",
+        foreign_keys=[upstream_id],
+        back_populates="downstream_dependencies"
+    )
+    downstream_target = relationship(
+        "ProbeTarget",
+        foreign_keys=[downstream_id],
+        back_populates="upstream_dependencies"
+    )
 
 
 class ProbeResult(Base):

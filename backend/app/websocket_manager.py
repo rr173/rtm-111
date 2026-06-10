@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal
-from .models import ProbeTarget, Alert, ProbeResult, ProbeGroup
+from .models import ProbeTarget, Alert, ProbeResult, ProbeGroup, Dependency
 from .probe_engine import probe_engine
 
 
@@ -53,9 +53,16 @@ class ConnectionManager:
         from sqlalchemy.orm import joinedload
         db = SessionLocal()
         try:
-            targets = db.query(ProbeTarget).options(joinedload(ProbeTarget.group)).all()
+            targets = db.query(ProbeTarget).options(
+                joinedload(ProbeTarget.group),
+                joinedload(ProbeTarget.cascade_source)
+            ).all()
             groups = db.query(ProbeGroup).all()
             alerts = db.query(Alert).order_by(Alert.timestamp.desc()).limit(100).all()
+            dependencies = db.query(Dependency).options(
+                joinedload(Dependency.upstream_target),
+                joinedload(Dependency.downstream_target)
+            ).all()
 
             targets_data = []
             for t in targets:
@@ -77,6 +84,10 @@ class ConnectionManager:
                 in_silent = probe_engine._is_in_silent_window(t)
                 next_probe_at = datetime.utcnow() + timedelta(seconds=current_interval)
 
+                cascade_source_name = None
+                if t.cascade_source_id and t.cascade_source:
+                    cascade_source_name = t.cascade_source.name
+
                 targets_data.append({
                     "id": t.id,
                     "group_id": t.group_id,
@@ -89,6 +100,9 @@ class ConnectionManager:
                     "paused": t.paused,
                     "silenced": t.silenced,
                     "status": t.status,
+                    "cascade_affected": t.cascade_affected,
+                    "cascade_source_id": t.cascade_source_id,
+                    "cascade_source_name": cascade_source_name,
                     "consecutive_failures": t.consecutive_failures,
                     "consecutive_successes": t.consecutive_successes,
                     "last_check": t.last_check.isoformat() if t.last_check else None,
@@ -145,11 +159,24 @@ class ConnectionManager:
                     "acknowledged": a.acknowledged
                 })
 
+            deps_data = []
+            for d in dependencies:
+                deps_data.append({
+                    "id": d.id,
+                    "upstream_id": d.upstream_id,
+                    "upstream_name": d.upstream_target.name if d.upstream_target else "",
+                    "downstream_id": d.downstream_id,
+                    "downstream_name": d.downstream_target.name if d.downstream_target else "",
+                    "description": d.description,
+                    "created_at": d.created_at.isoformat() if d.created_at else None
+                })
+
             snapshot = {
                 "type": "snapshot",
                 "targets": targets_data,
                 "groups": groups_data,
-                "alerts": alerts_data
+                "alerts": alerts_data,
+                "dependencies": deps_data
             }
             await websocket.send_json(snapshot)
         finally:
@@ -176,6 +203,89 @@ class ConnectionManager:
                 )
         except Exception as e:
             print(f"Broadcast error: {e}")
+
+    def broadcast_dependencies(self):
+        from sqlalchemy.orm import joinedload
+        db = SessionLocal()
+        try:
+            dependencies = db.query(Dependency).options(
+                joinedload(Dependency.upstream_target),
+                joinedload(Dependency.downstream_target)
+            ).all()
+            deps_data = []
+            for d in dependencies:
+                deps_data.append({
+                    "id": d.id,
+                    "upstream_id": d.upstream_id,
+                    "upstream_name": d.upstream_target.name if d.upstream_target else "",
+                    "downstream_id": d.downstream_id,
+                    "downstream_name": d.downstream_target.name if d.downstream_target else "",
+                    "description": d.description,
+                    "created_at": d.created_at.isoformat() if d.created_at else None
+                })
+            self._safe_broadcast({
+                "type": "dependencies_update",
+                "dependencies": deps_data
+            })
+        finally:
+            db.close()
+
+    def broadcast_targets(self):
+        from sqlalchemy.orm import joinedload
+        db = SessionLocal()
+        try:
+            targets = db.query(ProbeTarget).options(
+                joinedload(ProbeTarget.group),
+                joinedload(ProbeTarget.cascade_source)
+            ).all()
+            targets_data = []
+            for t in targets:
+                strategy = probe_engine._get_effective_strategy(t)
+                current_interval = probe_engine._get_effective_interval(t)
+                in_silent = probe_engine._is_in_silent_window(t)
+                next_probe_at = datetime.utcnow() + timedelta(seconds=current_interval)
+
+                cascade_source_name = None
+                if t.cascade_source_id and t.cascade_source:
+                    cascade_source_name = t.cascade_source.name
+
+                targets_data.append({
+                    "id": t.id,
+                    "group_id": t.group_id,
+                    "name": t.name,
+                    "type": t.type,
+                    "address": t.address,
+                    "interval": t.interval,
+                    "timeout": t.timeout,
+                    "expected_status": t.expected_status,
+                    "paused": t.paused,
+                    "silenced": t.silenced,
+                    "status": t.status,
+                    "cascade_affected": t.cascade_affected,
+                    "cascade_source_id": t.cascade_source_id,
+                    "cascade_source_name": cascade_source_name,
+                    "consecutive_failures": t.consecutive_failures,
+                    "consecutive_successes": t.consecutive_successes,
+                    "last_check": t.last_check.isoformat() if t.last_check else None,
+                    "created_at": t.created_at.isoformat(),
+                    "degrade_threshold": t.degrade_threshold,
+                    "down_threshold": t.down_threshold,
+                    "success_threshold": t.success_threshold,
+                    "adaptive_enabled": strategy["adaptive_enabled"],
+                    "slow_interval": strategy["slow_interval"],
+                    "fast_interval": strategy["fast_interval"],
+                    "silent_start": strategy["silent_start"],
+                    "silent_end": strategy["silent_end"],
+                    "current_interval": current_interval,
+                    "next_probe_at": next_probe_at.isoformat(),
+                    "in_silent_window": in_silent
+                })
+            self._safe_broadcast({
+                "type": "targets_snapshot",
+                "targets": targets_data
+            })
+        finally:
+            db.close()
 
     async def _broadcast(self, message: dict):
         dead_connections = []

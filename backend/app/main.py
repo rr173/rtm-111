@@ -1,26 +1,37 @@
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Set
 from datetime import datetime, timedelta
+from collections import deque
 
 from .database import engine, get_db, Base
-from .models import ProbeTarget, ProbeResult, Alert, ProbeGroup
+from .models import ProbeTarget, ProbeResult, Alert, ProbeGroup, Dependency
 from .schemas import (
     ProbeTargetCreate, ProbeTargetUpdate, ProbeTargetResponse,
     ProbeResultResponse, AlertResponse, AlertAcknowledge,
     ProbeGroupCreate, ProbeGroupUpdate, ProbeGroupResponse,
-    ProbeGroupWithTargetsResponse
+    ProbeGroupWithTargetsResponse,
+    DependencyCreate, DependencyUpdate, DependencyResponse,
+    DependencyWithNamesResponse, CascadeSimulationResponse
 )
 from .probe_engine import probe_engine
 from .websocket_manager import manager, get_target_history
 
 
-def _enrich_target(target: ProbeTarget) -> dict:
+def _enrich_target(target: ProbeTarget, db: Session = None) -> dict:
     strategy = probe_engine._get_effective_strategy(target)
     current_interval = probe_engine._get_effective_interval(target)
     in_silent = probe_engine._is_in_silent_window(target)
     next_probe_at = datetime.utcnow() + timedelta(seconds=current_interval)
+
+    cascade_source_name = None
+    if target.cascade_source_id and target.cascade_source:
+        cascade_source_name = target.cascade_source.name
+    elif target.cascade_source_id and db:
+        source = db.query(ProbeTarget).filter(ProbeTarget.id == target.cascade_source_id).first()
+        if source:
+            cascade_source_name = source.name
 
     return {
         "id": target.id,
@@ -34,6 +45,9 @@ def _enrich_target(target: ProbeTarget) -> dict:
         "paused": target.paused,
         "silenced": target.silenced,
         "status": target.status,
+        "cascade_affected": target.cascade_affected,
+        "cascade_source_id": target.cascade_source_id,
+        "cascade_source_name": cascade_source_name,
         "consecutive_failures": target.consecutive_failures,
         "consecutive_successes": target.consecutive_successes,
         "last_check": target.last_check,
@@ -82,11 +96,30 @@ def _migrate_database():
                 ("fast_interval", "INTEGER DEFAULT 5"),
                 ("silent_start", "VARCHAR(5)"),
                 ("silent_end", "VARCHAR(5)"),
+                ("cascade_affected", "INTEGER DEFAULT 0"),
+                ("cascade_source_id", "INTEGER"),
             ]
             for col_name, col_def in target_new_columns:
                 if col_name not in columns:
                     conn.execute(text(f"ALTER TABLE probe_targets ADD COLUMN {col_name} {col_def}"))
                     print(f"Added column {col_name} to probe_targets")
+
+            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='dependencies'"))
+            if not result.fetchone():
+                conn.execute(text("""
+                    CREATE TABLE dependencies (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        upstream_id INTEGER NOT NULL,
+                        downstream_id INTEGER NOT NULL,
+                        description VARCHAR(255),
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (upstream_id) REFERENCES probe_targets(id) ON DELETE CASCADE,
+                        FOREIGN KEY (downstream_id) REFERENCES probe_targets(id) ON DELETE CASCADE
+                    )
+                """))
+                conn.execute(text("CREATE INDEX idx_dependencies_upstream ON dependencies(upstream_id)"))
+                conn.execute(text("CREATE INDEX idx_dependencies_downstream ON dependencies(downstream_id)"))
+                print("Created dependencies table")
 
             conn.commit()
         except Exception as e:
@@ -331,6 +364,27 @@ def _init_demo_data():
             to_status="down",
             acknowledged=False
         ))
+
+        dep1 = Dependency(
+            upstream_id=target1.id,
+            downstream_id=target2.id,
+            description="示例服务依赖"
+        )
+        db.add(dep1)
+
+        dep2 = Dependency(
+            upstream_id=target2.id,
+            downstream_id=target4.id,
+            description="API网关依赖核心服务"
+        )
+        db.add(dep2)
+
+        dep3 = Dependency(
+            upstream_id=target4.id,
+            downstream_id=target5.id,
+            description="内部服务依赖API网关"
+        )
+        db.add(dep3)
 
         db.commit()
     except Exception as e:
@@ -637,6 +691,158 @@ def acknowledge_alert(alert_id: int, ack: AlertAcknowledge, db: Session = Depend
 
     db.commit()
     return {"message": "Alert updated"}
+
+
+def _get_downstream_targets(db: Session, target_id: int) -> List[ProbeTarget]:
+    visited = set()
+    result = []
+    queue = deque([target_id])
+
+    while queue:
+        current_id = queue.popleft()
+        if current_id in visited:
+            continue
+        visited.add(current_id)
+
+        deps = db.query(Dependency).filter(Dependency.upstream_id == current_id).all()
+        for dep in deps:
+            if dep.downstream_id not in visited:
+                downstream = db.query(ProbeTarget).filter(ProbeTarget.id == dep.downstream_id).first()
+                if downstream:
+                    result.append(downstream)
+                    queue.append(dep.downstream_id)
+
+    return result
+
+
+def _get_upstream_targets(db: Session, target_id: int) -> List[ProbeTarget]:
+    visited = set()
+    result = []
+    queue = deque([target_id])
+
+    while queue:
+        current_id = queue.popleft()
+        if current_id in visited:
+            continue
+        visited.add(current_id)
+
+        deps = db.query(Dependency).filter(Dependency.downstream_id == current_id).all()
+        for dep in deps:
+            if dep.upstream_id not in visited:
+                upstream = db.query(ProbeTarget).filter(ProbeTarget.id == dep.upstream_id).first()
+                if upstream:
+                    result.append(upstream)
+                    queue.append(dep.upstream_id)
+
+    return result
+
+
+def _update_cascade_status(db: Session, upstream_target: ProbeTarget):
+    if upstream_target.status == "down" or upstream_target.status == "degraded":
+        downstream_targets = _get_downstream_targets(db, upstream_target.id)
+        for target in downstream_targets:
+            if not target.cascade_affected:
+                target.cascade_affected = True
+                target.cascade_source_id = upstream_target.id
+                if not target.paused:
+                    target.paused = True
+                    probe_engine.toggle_target(target.id, True)
+    else:
+        downstream_targets = _get_downstream_targets(db, upstream_target.id)
+        for target in downstream_targets:
+            upstreams = _get_upstream_targets(db, target.id)
+            has_failed_upstream = any(
+                u.status in ("down", "degraded") for u in upstreams
+            )
+            if not has_failed_upstream and target.cascade_affected:
+                target.cascade_affected = False
+                target.cascade_source_id = None
+                if target.paused:
+                    target.paused = False
+                    probe_engine.toggle_target(target.id, False)
+
+
+@app.get("/api/dependencies", response_model=List[DependencyWithNamesResponse])
+def list_dependencies(db: Session = Depends(get_db)):
+    deps = db.query(Dependency).order_by(Dependency.id.asc()).all()
+    result = []
+    for dep in deps:
+        result.append({
+            "id": dep.id,
+            "upstream_id": dep.upstream_id,
+            "upstream_name": dep.upstream_target.name if dep.upstream_target else "",
+            "downstream_id": dep.downstream_id,
+            "downstream_name": dep.downstream_target.name if dep.downstream_target else "",
+            "description": dep.description,
+            "created_at": dep.created_at
+        })
+    return result
+
+
+@app.post("/api/dependencies", response_model=DependencyResponse)
+def create_dependency(dep: DependencyCreate, db: Session = Depends(get_db)):
+    if dep.upstream_id == dep.downstream_id:
+        raise HTTPException(status_code=400, detail="Cannot create dependency with same target")
+
+    upstream = db.query(ProbeTarget).filter(ProbeTarget.id == dep.upstream_id).first()
+    downstream = db.query(ProbeTarget).filter(ProbeTarget.id == dep.downstream_id).first()
+    if not upstream or not downstream:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    existing = db.query(Dependency).filter(
+        Dependency.upstream_id == dep.upstream_id,
+        Dependency.downstream_id == dep.downstream_id
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Dependency already exists")
+
+    db_dep = Dependency(**dep.model_dump())
+    db.add(db_dep)
+    db.commit()
+    db.refresh(db_dep)
+
+    _update_cascade_status(db, upstream)
+    db.commit()
+
+    manager.broadcast_dependencies()
+    manager.broadcast_targets()
+
+    return db_dep
+
+
+@app.delete("/api/dependencies/{dep_id}")
+def delete_dependency(dep_id: int, db: Session = Depends(get_db)):
+    dep = db.query(Dependency).filter(Dependency.id == dep_id).first()
+    if not dep:
+        raise HTTPException(status_code=404, detail="Dependency not found")
+
+    upstream_id = dep.upstream_id
+    db.delete(dep)
+    db.commit()
+
+    upstream = db.query(ProbeTarget).filter(ProbeTarget.id == upstream_id).first()
+    if upstream:
+        _update_cascade_status(db, upstream)
+        db.commit()
+
+    manager.broadcast_dependencies()
+    manager.broadcast_targets()
+
+    return {"message": "Dependency deleted"}
+
+
+@app.get("/api/dependencies/simulate/{target_id}", response_model=CascadeSimulationResponse)
+def simulate_cascade(target_id: int, db: Session = Depends(get_db)):
+    target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    downstream = _get_downstream_targets(db, target_id)
+    return {
+        "source_target_id": target_id,
+        "affected_target_ids": [t.id for t in downstream],
+        "affected_target_names": [t.name for t in downstream]
+    }
 
 
 @app.websocket("/api/ws")

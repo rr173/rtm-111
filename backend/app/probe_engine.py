@@ -7,7 +7,8 @@ import httpx
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal
-from .models import ProbeTarget, ProbeResult, Alert
+from .models import ProbeTarget, ProbeResult, Alert, Dependency
+from collections import deque
 
 
 MAX_CONCURRENT_PROBES = 10
@@ -246,6 +247,78 @@ class ProbeEngine:
 
         target.last_check = result["timestamp"]
 
+    def _get_downstream_targets(self, db: Session, target_id: int) -> List[ProbeTarget]:
+        visited = set()
+        result = []
+        queue = deque([target_id])
+
+        while queue:
+            current_id = queue.popleft()
+            if current_id in visited:
+                continue
+            visited.add(current_id)
+
+            deps = db.query(Dependency).filter(Dependency.upstream_id == current_id).all()
+            for dep in deps:
+                if dep.downstream_id not in visited:
+                    downstream = db.query(ProbeTarget).filter(ProbeTarget.id == dep.downstream_id).first()
+                    if downstream:
+                        result.append(downstream)
+                        queue.append(dep.downstream_id)
+
+        return result
+
+    def _get_upstream_targets(self, db: Session, target_id: int) -> List[ProbeTarget]:
+        visited = set()
+        result = []
+        queue = deque([target_id])
+
+        while queue:
+            current_id = queue.popleft()
+            if current_id in visited:
+                continue
+            visited.add(current_id)
+
+            deps = db.query(Dependency).filter(Dependency.downstream_id == current_id).all()
+            for dep in deps:
+                if dep.upstream_id not in visited:
+                    upstream = db.query(ProbeTarget).filter(ProbeTarget.id == dep.upstream_id).first()
+                    if upstream:
+                        result.append(upstream)
+                        queue.append(dep.upstream_id)
+
+        return result
+
+    def _update_cascade_status(self, db: Session, upstream_target: ProbeTarget):
+        if upstream_target.status == "down" or upstream_target.status == "degraded":
+            downstream_targets = self._get_downstream_targets(db, upstream_target.id)
+            for target in downstream_targets:
+                if not target.cascade_affected:
+                    target.cascade_affected = True
+                    target.cascade_source_id = upstream_target.id
+                    if not target.paused:
+                        target.paused = True
+                        self.toggle_target(target.id, True)
+                    db.flush()
+                    db.refresh(target)
+                    self._notify_status_change(target)
+        else:
+            downstream_targets = self._get_downstream_targets(db, upstream_target.id)
+            for target in downstream_targets:
+                upstreams = self._get_upstream_targets(db, target.id)
+                has_failed_upstream = any(
+                    u.status in ("down", "degraded") for u in upstreams
+                )
+                if not has_failed_upstream and target.cascade_affected:
+                    target.cascade_affected = False
+                    target.cascade_source_id = None
+                    if target.paused:
+                        target.paused = False
+                        self.toggle_target(target.id, False)
+                    db.flush()
+                    db.refresh(target)
+                    self._notify_status_change(target)
+
     def _update_state_machine(self, db: Session, target: ProbeTarget, result: dict):
         old_status = target.status
 
@@ -276,6 +349,8 @@ class ProbeEngine:
             in_silent = self._is_in_silent_window(target)
             if not target.silenced and not in_silent:
                 self._notify_alert(target, alert)
+
+            self._update_cascade_status(db, target)
 
         self._notify_status_change(target)
 
@@ -435,16 +510,24 @@ class ProbeEngine:
 
         strategy = self._get_effective_strategy(target)
 
+        cascade_source_name = None
+        if target.cascade_source_id and target.cascade_source:
+            cascade_source_name = target.cascade_source.name
+
         data = {
             "type": "status_update",
             "target": {
                 "id": target.id,
+                "group_id": target.group_id,
                 "name": target.name,
                 "type": target.type,
                 "address": target.address,
                 "status": target.status,
                 "paused": target.paused,
                 "silenced": target.silenced,
+                "cascade_affected": target.cascade_affected,
+                "cascade_source_id": target.cascade_source_id,
+                "cascade_source_name": cascade_source_name,
                 "consecutive_failures": target.consecutive_failures,
                 "consecutive_successes": target.consecutive_successes,
                 "last_check": target.last_check.isoformat() if target.last_check else None,

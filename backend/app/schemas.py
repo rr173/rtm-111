@@ -101,6 +101,9 @@ class ProbeTargetResponse(BaseModel):
     paused: bool
     silenced: bool
     status: str
+    cascade_affected: bool
+    cascade_source_id: Optional[int] = None
+    cascade_source_name: Optional[str] = None
     consecutive_failures: int
     consecutive_successes: int
     last_check: Optional[datetime]
@@ -153,3 +156,47 @@ class AlertResponse(BaseModel):
 
 class AlertAcknowledge(BaseModel):
     acknowledged: bool
+
+
+class DependencyCreate(BaseModel):
+    upstream_id: int
+    downstream_id: int
+    description: Optional[str] = None
+
+
+class DependencyUpdate(BaseModel):
+    description: Optional[str] = None
+
+
+class DependencyResponse(BaseModel):
+    id: int
+    upstream_id: int
+    downstream_id: int
+    description: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DependencyWithNamesResponse(BaseModel):
+    id: int
+    upstream_id: int
+    upstream_name: str
+    downstream_id: int
+    downstream_name: str
+    description: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class CascadeSimulationRequest(BaseModel):
+    target_id: int
+
+
+class CascadeSimulationResponse(BaseModel):
+    source_target_id: int
+    affected_target_ids: List[int]
+    affected_target_names: List[str]

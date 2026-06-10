@@ -60,9 +60,10 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
     }
   };
 
-  const displayStatus = target.paused ? 'paused' : target.status;
+  const displayStatus = target.cascade_affected ? 'cascade' : (target.paused ? 'paused' : target.status);
 
   const statusLabel = useMemo(() => {
+    if (target.cascade_affected) return '级联受损';
     if (target.paused) return '已暂停';
     switch (target.status) {
       case 'healthy': return '健康';
@@ -70,7 +71,7 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
       case 'down': return '故障';
       default: return target.status;
     }
-  }, [target.status, target.paused]);
+  }, [target.status, target.paused, target.cascade_affected]);
 
   const formatTime = (isoString) => {
     if (!isoString) return '—';
@@ -115,10 +116,17 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
             <span className={`status-badge ${displayStatus}`}>
               {statusLabel}
             </span>
+            {target.cascade_affected && <span className="cascade-badge">级联受损</span>}
             {target.silenced && <span className="silenced-badge">已消声</span>}
             {target.in_silent_window && <span className="silent-window-badge">静默中</span>}
             {target.adaptive_enabled && <span className="adaptive-badge">自适应</span>}
           </div>
+          {target.cascade_affected && target.cascade_source_name && (
+            <div className="cascade-source-info">
+              <span className="cascade-source-label">级联源:</span>
+              <span className="cascade-source-name">{target.cascade_source_name}</span>
+            </div>
+          )}
           <div className="target-address">
             {target.type.toUpperCase()} · {target.address}
             {target.expected_status && ` · 期望: ${target.expected_status}`}

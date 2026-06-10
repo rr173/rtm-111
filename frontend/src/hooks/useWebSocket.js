@@ -5,6 +5,7 @@ export function useWebSocket() {
   const [targets, setTargets] = useState([]);
   const [groups, setGroups] = useState([]);
   const [alerts, setAlerts] = useState([]);
+  const [dependencies, setDependencies] = useState([]);
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const resultsRef = useRef({});
@@ -13,20 +14,23 @@ export function useWebSocket() {
   const loadInitialData = useCallback(async () => {
     try {
       const apiBase = import.meta.env.VITE_API_HTTP_URL || '';
-      const [targetsRes, groupsRes, alertsRes] = await Promise.all([
+      const [targetsRes, groupsRes, alertsRes, depsRes] = await Promise.all([
         fetch(`${apiBase}/api/targets`),
         fetch(`${apiBase}/api/groups`),
-        fetch(`${apiBase}/api/alerts?limit=50`)
+        fetch(`${apiBase}/api/alerts?limit=50`),
+        fetch(`${apiBase}/api/dependencies`)
       ]);
-      if (targetsRes.ok && groupsRes.ok && alertsRes.ok) {
-        const [targetsData, groupsData, alertsData] = await Promise.all([
+      if (targetsRes.ok && groupsRes.ok && alertsRes.ok && depsRes.ok) {
+        const [targetsData, groupsData, alertsData, depsData] = await Promise.all([
           targetsRes.json(),
           groupsRes.json(),
-          alertsRes.json()
+          alertsRes.json(),
+          depsRes.json()
         ]);
         setTargets(targetsData);
         setGroups(groupsData);
         setAlerts(alertsData.reverse());
+        setDependencies(depsData);
       }
     } catch (e) {
       console.error('Failed to load initial data:', e);
@@ -66,6 +70,7 @@ export function useWebSocket() {
         if (data.type === 'snapshot') {
           setTargets(data.targets || []);
           setGroups(data.groups || []);
+          setDependencies(data.dependencies || []);
           setAlerts(prevAlerts => {
             const snapshotAlerts = data.alerts || [];
             const merged = new Map();
@@ -101,6 +106,10 @@ export function useWebSocket() {
               }
             }
           }
+        } else if (data.type === 'targets_snapshot') {
+          setTargets(data.targets || []);
+        } else if (data.type === 'dependencies_update') {
+          setDependencies(data.dependencies || []);
         } else if (data.type === 'status_update') {
           setTargets(prev => {
             const idx = prev.findIndex(t => t.id === data.target.id);
@@ -180,15 +189,21 @@ export function useWebSocket() {
     setAlerts(newAlerts);
   }, []);
 
+  const setDependenciesData = useCallback((newDeps) => {
+    setDependencies(newDeps);
+  }, []);
+
   return {
     connected,
     targets,
     groups,
     alerts,
+    dependencies,
     getResults,
     setTargets: setTargetsData,
     setGroups: setGroupsData,
     setAlerts: setAlertsData,
+    setDependencies: setDependenciesData,
     loadInitialData
   };
 }

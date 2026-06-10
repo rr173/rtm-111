@@ -5,11 +5,24 @@ import TargetList from './components/TargetList';
 import AlertPanel from './components/AlertPanel';
 import AddTargetModal from './components/AddTargetModal';
 import AddGroupModal from './components/AddGroupModal';
+import TopologyPage from './components/TopologyPage';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
 function App() {
-  const { connected, targets, groups, alerts, setTargets, setGroups, setAlerts, loadInitialData } = useWebSocket();
+  const {
+    connected,
+    targets,
+    groups,
+    alerts,
+    dependencies,
+    setTargets,
+    setGroups,
+    setAlerts,
+    setDependencies,
+    loadInitialData
+  } = useWebSocket();
+  const [activeTab, setActiveTab] = useState('list');
   const [expandedTarget, setExpandedTarget] = useState(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showAddGroupModal, setShowAddGroupModal] = useState(false);
@@ -154,6 +167,20 @@ function App() {
     <div className="app">
       <header className="header">
         <h1>🔍 服务探活与告警仪表台</h1>
+        <div className="header-tabs">
+          <button
+            className={`tab-btn ${activeTab === 'list' ? 'active' : ''}`}
+            onClick={() => setActiveTab('list')}
+          >
+            📋 目标列表
+          </button>
+          <button
+            className={`tab-btn ${activeTab === 'topology' ? 'active' : ''}`}
+            onClick={() => setActiveTab('topology')}
+          >
+            🔗 依赖拓扑
+          </button>
+        </div>
         <div className="connection-status">
           <span className={`status-dot ${connected ? 'connected' : 'disconnected'}`}></span>
           <span>{connected ? '实时连接' : '连接断开'}</span>
@@ -162,24 +189,34 @@ function App() {
 
       <div className="main-content">
         <div className="left-panel">
-          <StatsBar
-            healthy={healthyCount}
-            degraded={degradedCount}
-            down={downCount}
-          />
-          <TargetList
-            targets={targets}
-            groups={groups}
-            expandedTarget={expandedTarget}
-            onToggleExpand={setExpandedTarget}
-            onDelete={deleteTarget}
-            onTogglePause={togglePause}
-            onToggleSilence={toggleSilence}
-            detailData={detailData}
-            onRefreshGroups={refreshGroups}
-            onRefreshTargets={refreshTargets}
-            onTargetGroupChange={handleTargetGroupChange}
-          />
+          {activeTab === 'list' ? (
+            <>
+              <StatsBar
+                healthy={healthyCount}
+                degraded={degradedCount}
+                down={downCount}
+              />
+              <TargetList
+                targets={targets}
+                groups={groups}
+                expandedTarget={expandedTarget}
+                onToggleExpand={setExpandedTarget}
+                onDelete={deleteTarget}
+                onTogglePause={togglePause}
+                onToggleSilence={toggleSilence}
+                detailData={detailData}
+                onRefreshGroups={refreshGroups}
+                onRefreshTargets={refreshTargets}
+                onTargetGroupChange={handleTargetGroupChange}
+              />
+            </>
+          ) : (
+            <TopologyPage
+              targets={targets}
+              dependencies={dependencies}
+              setDependencies={setDependencies}
+            />
+          )}
         </div>
 
         <div className="right-panel">
@@ -190,14 +227,16 @@ function App() {
         </div>
       </div>
 
-      <div className="fab-container">
-        <button className="add-group-btn" onClick={() => setShowAddGroupModal(true)}>
-          + 分组
-        </button>
-        <button className="add-target-btn" onClick={() => setShowAddModal(true)}>
-          + 目标
-        </button>
-      </div>
+      {activeTab === 'list' && (
+        <div className="fab-container">
+          <button className="add-group-btn" onClick={() => setShowAddGroupModal(true)}>
+            + 分组
+          </button>
+          <button className="add-target-btn" onClick={() => setShowAddModal(true)}>
+            + 目标
+          </button>
+        </div>
+      )}
 
       {showAddModal && (
         <AddTargetModal
