@@ -1,6 +1,7 @@
 import { useMemo, useState, useEffect } from 'react';
 import StatusTimeline from './StatusTimeline';
 import LatencyChart from './LatencyChart';
+import RuleTopology from './RuleTopology';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
@@ -9,11 +10,15 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
   const [alertsHistory, setAlertsHistory] = useState([]);
   const [selectedGroupId, setSelectedGroupId] = useState(target.group_id || '');
   const [nextProbeCountdown, setNextProbeCountdown] = useState(null);
+  const [ruleData, setRuleData] = useState(null);
 
   useEffect(() => {
     if (expanded) {
       fetchHistory();
       fetchAlerts();
+      if (target.rule_id) {
+        fetchRuleDetails();
+      }
     }
   }, [expanded, target.id]);
 
@@ -57,6 +62,18 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
       }
     } catch (e) {
       console.error('Failed to fetch alerts:', e);
+    }
+  };
+
+  const fetchRuleDetails = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/rules/${target.rule_id}/execution?target_id=${target.id}`);
+      if (res.ok) {
+        const data = await res.json();
+        setRuleData(data);
+      }
+    } catch (e) {
+      console.error('Failed to fetch rule details:', e);
     }
   };
 
@@ -120,6 +137,7 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
             {target.silenced && <span className="silenced-badge">已消声</span>}
             {target.in_silent_window && <span className="silent-window-badge">静默中</span>}
             {target.adaptive_enabled && <span className="adaptive-badge">自适应</span>}
+            {target.rule_id && <span className="rule-badge" title={`绑定规则 #${target.rule_id}`}>📋 规则编排</span>}
           </div>
           {target.cascade_affected && target.cascade_source_name && (
             <div className="cascade-source-info">
@@ -186,6 +204,29 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
 
       {expanded && (
         <div className="target-details">
+          {target.rule_id && (
+            <div className="detail-section">
+              <h3>
+                📋 规则步骤拓扑
+                {ruleData?.rule_name && (
+                  <span style={{ fontSize: '13px', color: '#94a3b8', marginLeft: '8px', fontWeight: 'normal' }}>
+                    {ruleData.rule_name} (v{ruleData.version || 1})
+                  </span>
+                )}
+              </h3>
+              {ruleData ? (
+                <RuleTopology
+                  steps={ruleData.steps || []}
+                  execution_mode={ruleData.execution_mode}
+                />
+              ) : (
+                <div style={{ color: '#64748b', textAlign: 'center', padding: '20px' }}>
+                  加载中...
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="detail-section">
             <h3>📊 统计数据 (24小时)</h3>
             {historyData ? (

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ForeignKey, Text, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from .database import Base
@@ -25,11 +25,90 @@ class ProbeGroup(Base):
     targets = relationship("ProbeTarget", back_populates="group")
 
 
+class ProbeRule(Base):
+    __tablename__ = "probe_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(String(512), nullable=True)
+    current_version_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    versions = relationship("ProbeRuleVersion", back_populates="rule", cascade="all, delete-orphan")
+    targets = relationship("ProbeTarget", back_populates="rule")
+
+
+class ProbeRuleVersion(Base):
+    __tablename__ = "probe_rule_versions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rule_id = Column(Integer, ForeignKey("probe_rules.id"), nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    execution_mode = Column(String(10), nullable=False, default="sequence")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    rule = relationship("ProbeRule", back_populates="versions")
+    steps = relationship("ProbeRuleStep", back_populates="version", cascade="all, delete-orphan")
+    executions = relationship("ProbeRuleExecution", back_populates="version")
+
+
+class ProbeRuleStep(Base):
+    __tablename__ = "probe_rule_steps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    version_id = Column(Integer, ForeignKey("probe_rule_versions.id"), nullable=False)
+    step_order = Column(Integer, nullable=False, default=0)
+    name = Column(String(255), nullable=False)
+    step_type = Column(String(30), nullable=False)
+    config = Column(JSON, nullable=True)
+    timeout = Column(Integer, nullable=False, default=5)
+    pass_condition = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    version = relationship("ProbeRuleVersion", back_populates="steps")
+    executions = relationship("ProbeRuleStepExecution", back_populates="step", cascade="all, delete-orphan")
+
+
+class ProbeRuleExecution(Base):
+    __tablename__ = "probe_rule_executions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False)
+    version_id = Column(Integer, ForeignKey("probe_rule_versions.id"), nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    success = Column(Boolean, nullable=False)
+    latency_ms = Column(Float, nullable=True)
+    error_message = Column(Text, nullable=True)
+    failed_step_id = Column(Integer, nullable=True)
+
+    target = relationship("ProbeTarget", back_populates="rule_executions")
+    version = relationship("ProbeRuleVersion", back_populates="executions")
+    step_executions = relationship("ProbeRuleStepExecution", back_populates="rule_execution", cascade="all, delete-orphan")
+
+
+class ProbeRuleStepExecution(Base):
+    __tablename__ = "probe_rule_step_executions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rule_execution_id = Column(Integer, ForeignKey("probe_rule_executions.id"), nullable=False)
+    step_id = Column(Integer, ForeignKey("probe_rule_steps.id"), nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    success = Column(Boolean, nullable=False)
+    latency_ms = Column(Float, nullable=True)
+    error_message = Column(Text, nullable=True)
+    raw_response = Column(Text, nullable=True)
+
+    rule_execution = relationship("ProbeRuleExecution", back_populates="step_executions")
+    step = relationship("ProbeRuleStep", back_populates="executions")
+
+
 class ProbeTarget(Base):
     __tablename__ = "probe_targets"
 
     id = Column(Integer, primary_key=True, index=True)
     group_id = Column(Integer, ForeignKey("probe_groups.id"), nullable=True)
+    rule_id = Column(Integer, ForeignKey("probe_rules.id"), nullable=True)
     name = Column(String(255), nullable=False)
     type = Column(String(10), nullable=False)
     address = Column(String(512), nullable=False)
@@ -56,8 +135,10 @@ class ProbeTarget(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     group = relationship("ProbeGroup", back_populates="targets")
+    rule = relationship("ProbeRule", back_populates="targets")
     results = relationship("ProbeResult", back_populates="target", cascade="all, delete-orphan")
     alerts = relationship("Alert", back_populates="target", cascade="all, delete-orphan")
+    rule_executions = relationship("ProbeRuleExecution", back_populates="target", cascade="all, delete-orphan")
     cascade_source = relationship("ProbeTarget", remote_side=[id], foreign_keys=[cascade_source_id])
     downstream_dependencies = relationship(
         "Dependency",

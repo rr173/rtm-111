@@ -6,6 +6,7 @@ import AlertPanel from './components/AlertPanel';
 import AddTargetModal from './components/AddTargetModal';
 import AddGroupModal from './components/AddGroupModal';
 import TopologyPage from './components/TopologyPage';
+import RuleEditor from './components/RuleEditor';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
@@ -26,7 +27,21 @@ function App() {
   const [expandedTarget, setExpandedTarget] = useState(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showAddGroupModal, setShowAddGroupModal] = useState(false);
+  const [showRuleEditor, setShowRuleEditor] = useState(false);
   const [detailData, setDetailData] = useState({});
+  const [rules, setRules] = useState([]);
+
+  const loadRules = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/rules`);
+      if (res.ok) {
+        const data = await res.json();
+        setRules(data);
+      }
+    } catch (e) {
+      console.error('Failed to load rules:', e);
+    }
+  }, []);
 
   const refreshGroups = useCallback(async () => {
     try {
@@ -57,6 +72,10 @@ function App() {
       fetchTargetHistory(expandedTarget);
     }
   }, [expandedTarget]);
+
+  useEffect(() => {
+    loadRules();
+  }, [loadRules]);
 
   const fetchTargetHistory = async (targetId) => {
     try {
@@ -180,6 +199,12 @@ function App() {
           >
             🔗 依赖拓扑
           </button>
+          <button
+            className={`tab-btn`}
+            onClick={() => setShowRuleEditor(true)}
+          >
+            📋 规则管理
+          </button>
         </div>
         <div className="connection-status">
           <span className={`status-dot ${connected ? 'connected' : 'disconnected'}`}></span>
@@ -232,6 +257,13 @@ function App() {
           <button className="add-group-btn" onClick={() => setShowAddGroupModal(true)}>
             + 分组
           </button>
+          <button
+            className="add-group-btn"
+            onClick={() => setShowRuleEditor(true)}
+            style={{ background: '#7c3aed' }}
+          >
+            📋 规则
+          </button>
           <button className="add-target-btn" onClick={() => setShowAddModal(true)}>
             + 目标
           </button>
@@ -243,6 +275,7 @@ function App() {
           onClose={() => setShowAddModal(false)}
           onSubmit={addTarget}
           groups={groups}
+          rules={rules}
         />
       )}
 
@@ -251,6 +284,15 @@ function App() {
           onClose={() => setShowAddGroupModal(false)}
           onSubmit={(newGroup) => {
             setGroups(prev => [...prev, newGroup]);
+          }}
+        />
+      )}
+
+      {showRuleEditor && (
+        <RuleEditor
+          onClose={() => {
+            setShowRuleEditor(false);
+            loadRules();
           }}
         />
       )}

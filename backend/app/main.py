@@ -1,19 +1,27 @@
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from typing import List, Set
 from datetime import datetime, timedelta
 from collections import deque
 
 from .database import engine, get_db, Base
-from .models import ProbeTarget, ProbeResult, Alert, ProbeGroup, Dependency
+from .models import (
+    ProbeTarget, ProbeResult, Alert, ProbeGroup, Dependency,
+    ProbeRule, ProbeRuleVersion, ProbeRuleStep,
+    ProbeRuleExecution, ProbeRuleStepExecution,
+)
 from .schemas import (
     ProbeTargetCreate, ProbeTargetUpdate, ProbeTargetResponse,
     ProbeResultResponse, AlertResponse, AlertAcknowledge,
     ProbeGroupCreate, ProbeGroupUpdate, ProbeGroupResponse,
     ProbeGroupWithTargetsResponse,
     DependencyCreate, DependencyUpdate, DependencyResponse,
-    DependencyWithNamesResponse, CascadeSimulationResponse
+    DependencyWithNamesResponse, CascadeSimulationResponse,
+    ProbeRuleCreate, ProbeRuleUpdate, ProbeRuleResponse,
+    ProbeRuleVersionResponse, ProbeRuleStepResponse,
+    ProbeRuleExecutionResponse, ProbeRuleStepExecutionResponse,
+    ProbeRuleStepHistoryResponse,
 )
 from .probe_engine import probe_engine
 from .websocket_manager import manager, get_target_history
@@ -33,9 +41,15 @@ def _enrich_target(target: ProbeTarget, db: Session = None) -> dict:
         if source:
             cascade_source_name = source.name
 
+    rule_name = None
+    if target.rule_id and target.rule:
+        rule_name = target.rule.name
+
     return {
         "id": target.id,
         "group_id": target.group_id,
+        "rule_id": target.rule_id,
+        "rule_name": rule_name,
         "name": target.name,
         "type": target.type,
         "address": target.address,
@@ -65,7 +79,9 @@ def _enrich_target(target: ProbeTarget, db: Session = None) -> dict:
         "created_at": target.created_at,
     }
 
-Base.metadata.create_all(bind=engine)
+
+def _create_tables():
+    Base.metadata.create_all(bind=engine)
 
 
 def _migrate_database():
@@ -98,11 +114,104 @@ def _migrate_database():
                 ("silent_end", "VARCHAR(5)"),
                 ("cascade_affected", "INTEGER DEFAULT 0"),
                 ("cascade_source_id", "INTEGER"),
+                ("rule_id", "INTEGER"),
             ]
             for col_name, col_def in target_new_columns:
                 if col_name not in columns:
                     conn.execute(text(f"ALTER TABLE probe_targets ADD COLUMN {col_name} {col_def}"))
                     print(f"Added column {col_name} to probe_targets")
+
+            rule_tables = {
+                "probe_rules": """
+                    CREATE TABLE probe_rules (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name VARCHAR(255) NOT NULL,
+                        description VARCHAR(512),
+                        current_version_id INTEGER,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """,
+                "probe_rule_versions": """
+                    CREATE TABLE probe_rule_versions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        rule_id INTEGER NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        execution_mode VARCHAR(10) NOT NULL DEFAULT 'sequence',
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (rule_id) REFERENCES probe_rules(id) ON DELETE CASCADE
+                    )
+                """,
+                "probe_rule_steps": """
+                    CREATE TABLE probe_rule_steps (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        version_id INTEGER NOT NULL,
+                        step_order INTEGER NOT NULL DEFAULT 0,
+                        name VARCHAR(255) NOT NULL,
+                        step_type VARCHAR(30) NOT NULL,
+                        config TEXT,
+                        timeout INTEGER NOT NULL DEFAULT 5,
+                        pass_condition TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (version_id) REFERENCES probe_rule_versions(id) ON DELETE CASCADE
+                    )
+                """,
+                "probe_rule_executions": """
+                    CREATE TABLE probe_rule_executions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        target_id INTEGER NOT NULL,
+                        version_id INTEGER NOT NULL,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        success INTEGER NOT NULL,
+                        latency_ms REAL,
+                        error_message TEXT,
+                        failed_step_id INTEGER,
+                        FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE CASCADE,
+                        FOREIGN KEY (version_id) REFERENCES probe_rule_versions(id)
+                    )
+                """,
+                "probe_rule_step_executions": """
+                    CREATE TABLE probe_rule_step_executions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        rule_execution_id INTEGER NOT NULL,
+                        step_id INTEGER NOT NULL,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        success INTEGER NOT NULL,
+                        latency_ms REAL,
+                        error_message TEXT,
+                        raw_response TEXT,
+                        FOREIGN KEY (rule_execution_id) REFERENCES probe_rule_executions(id) ON DELETE CASCADE,
+                        FOREIGN KEY (step_id) REFERENCES probe_rule_steps(id) ON DELETE CASCADE
+                    )
+                """,
+            }
+
+            for table_name, create_sql in rule_tables.items():
+                result = conn.execute(text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"))
+                if not result.fetchone():
+                    conn.execute(text(create_sql))
+                    index_sqls = {
+                        "probe_rule_versions": [
+                            "CREATE INDEX idx_rule_versions_rule_id ON probe_rule_versions(rule_id)"
+                        ],
+                        "probe_rule_steps": [
+                            "CREATE INDEX idx_rule_steps_version_id ON probe_rule_steps(version_id)"
+                        ],
+                        "probe_rule_executions": [
+                            "CREATE INDEX idx_rule_executions_target_id ON probe_rule_executions(target_id)",
+                            "CREATE INDEX idx_rule_executions_version_id ON probe_rule_executions(version_id)",
+                            "CREATE INDEX idx_rule_executions_timestamp ON probe_rule_executions(timestamp)",
+                        ],
+                        "probe_rule_step_executions": [
+                            "CREATE INDEX idx_step_executions_rule_execution_id ON probe_rule_step_executions(rule_execution_id)",
+                            "CREATE INDEX idx_step_executions_step_id ON probe_rule_step_executions(step_id)",
+                            "CREATE INDEX idx_step_executions_timestamp ON probe_rule_step_executions(timestamp)",
+                        ],
+                    }
+                    if table_name in index_sqls:
+                        for idx_sql in index_sqls[table_name]:
+                            conn.execute(text(idx_sql))
+                    print(f"Created table {table_name}")
 
             result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='dependencies'"))
             if not result.fetchone():
@@ -126,6 +235,7 @@ def _migrate_database():
             print(f"Migration error: {e}")
 
 
+_create_tables()
 _migrate_database()
 
 app = FastAPI(title="Probe Dashboard API")
@@ -146,6 +256,7 @@ async def startup_event():
     probe_engine.set_loop(loop)
     manager.set_loop(loop)
     _init_demo_data()
+    _init_demo_rules()
     await probe_engine.start()
 
 
@@ -394,6 +505,528 @@ def _init_demo_data():
         db.close()
 
 
+def _init_demo_rules():
+    db = next(get_db())
+    try:
+        rule_count = db.query(ProbeRule).count()
+        if rule_count > 0:
+            return
+
+        now = datetime.utcnow()
+
+        rule1 = ProbeRule(
+            name="Web应用完整健康检查",
+            description="HTTP 200 + 关键词匹配 + 数据库端口连通，三步全过才健康",
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(rule1)
+        db.flush()
+
+        version1 = ProbeRuleVersion(
+            rule_id=rule1.id,
+            version=1,
+            execution_mode="sequence",
+            created_at=now,
+        )
+        db.add(version1)
+        db.flush()
+
+        step1 = ProbeRuleStep(
+            version_id=version1.id,
+            step_order=0,
+            name="首页HTTP状态码",
+            step_type="http_status",
+            config={"url": "https://httpbin.org/status/200", "method": "GET", "follow_redirects": False},
+            timeout=5,
+            pass_condition={"expected_codes": ["200", "201", "200-399"]},
+            created_at=now,
+        )
+        step2 = ProbeRuleStep(
+            version_id=version1.id,
+            step_order=1,
+            name="响应体关键词匹配",
+            step_type="http_body_match",
+            config={"url": "https://httpbin.org/html", "method": "GET", "follow_redirects": True},
+            timeout=8,
+            pass_condition={"mode": "contains_any", "patterns": ["Herman", "Moby", "httpbin"]},
+            created_at=now,
+        )
+        step3 = ProbeRuleStep(
+            version_id=version1.id,
+            step_order=2,
+            name="数据库TCP端口",
+            step_type="tcp_connect",
+            config={"address": "httpbin.org:443"},
+            timeout=5,
+            pass_condition={},
+            created_at=now,
+        )
+        db.add_all([step1, step2, step3])
+        db.flush()
+
+        rule1.current_version_id = version1.id
+
+        rule2 = ProbeRule(
+            name="多节点高可用探测",
+            description="并行探测三个节点，任一可用即判定健康",
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(rule2)
+        db.flush()
+
+        version2 = ProbeRuleVersion(
+            rule_id=rule2.id,
+            version=1,
+            execution_mode="parallel",
+            created_at=now,
+        )
+        db.add(version2)
+        db.flush()
+
+        pstep1 = ProbeRuleStep(
+            version_id=version2.id,
+            step_order=0,
+            name="节点A",
+            step_type="http_status",
+            config={"url": "https://httpbin.org/status/200", "method": "GET"},
+            timeout=5,
+            pass_condition={"expected_codes": ["200"]},
+            created_at=now,
+        )
+        pstep2 = ProbeRuleStep(
+            version_id=version2.id,
+            step_order=1,
+            name="节点B",
+            step_type="http_status",
+            config={"url": "https://httpbin.org/status/200", "method": "GET"},
+            timeout=5,
+            pass_condition={"expected_codes": ["200"]},
+            created_at=now,
+        )
+        pstep3 = ProbeRuleStep(
+            version_id=version2.id,
+            step_order=2,
+            name="DNS解析验证",
+            step_type="dns_resolve",
+            config={"domain": "httpbin.org"},
+            timeout=5,
+            pass_condition={},
+            created_at=now,
+        )
+        db.add_all([pstep1, pstep2, pstep3])
+        db.flush()
+
+        rule2.current_version_id = version2.id
+
+        rule3 = ProbeRule(
+            name="延迟敏感型API检查",
+            description="检查API延迟是否在阈值以内",
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(rule3)
+        db.flush()
+
+        version3 = ProbeRuleVersion(
+            rule_id=rule3.id,
+            version=1,
+            execution_mode="sequence",
+            created_at=now,
+        )
+        db.add(version3)
+        db.flush()
+
+        lstep1 = ProbeRuleStep(
+            version_id=version3.id,
+            step_order=0,
+            name="API响应延迟检查",
+            step_type="latency_threshold",
+            config={"step_type": "http_status", "config": {"url": "https://httpbin.org/delay/1", "method": "GET"}},
+            timeout=10,
+            pass_condition={"max_latency_ms": 3000},
+            created_at=now,
+        )
+        db.add(lstep1)
+        db.flush()
+
+        rule3.current_version_id = version3.id
+
+        db.commit()
+        print("Demo rules initialized")
+    except Exception as e:
+        print(f"Demo rules init error: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _rule_to_response(rule: ProbeRule, db: Session) -> dict:
+    versions = []
+    for v in sorted(rule.versions, key=lambda x: x.version, reverse=True):
+        steps = []
+        for s in sorted(v.steps, key=lambda x: x.step_order):
+            steps.append({
+                "id": s.id,
+                "version_id": s.version_id,
+                "step_order": s.step_order,
+                "name": s.name,
+                "step_type": s.step_type,
+                "config": s.config,
+                "timeout": s.timeout,
+                "pass_condition": s.pass_condition,
+                "created_at": s.created_at,
+            })
+        versions.append({
+            "id": v.id,
+            "rule_id": v.rule_id,
+            "version": v.version,
+            "execution_mode": v.execution_mode,
+            "created_at": v.created_at,
+            "steps": steps,
+        })
+
+    current_version_obj = None
+    if rule.current_version_id:
+        for v in versions:
+            if v["id"] == rule.current_version_id:
+                current_version_obj = v
+                break
+
+    bound_count = db.query(ProbeTarget).filter(ProbeTarget.rule_id == rule.id).count()
+
+    return {
+        "id": rule.id,
+        "name": rule.name,
+        "description": rule.description,
+        "current_version_id": rule.current_version_id,
+        "current_version": current_version_obj["version"] if current_version_obj else None,
+        "execution_mode": current_version_obj["execution_mode"] if current_version_obj else None,
+        "created_at": rule.created_at,
+        "updated_at": rule.updated_at,
+        "versions": versions,
+        "bound_target_count": bound_count,
+    }
+
+
+@app.get("/api/rules", response_model=List[ProbeRuleResponse])
+def list_rules(db: Session = Depends(get_db)):
+    rules = db.query(ProbeRule).order_by(ProbeRule.id.asc()).all()
+    return [_rule_to_response(r, db) for r in rules]
+
+
+@app.get("/api/rules/{rule_id}", response_model=ProbeRuleResponse)
+def get_rule(rule_id: int, db: Session = Depends(get_db)):
+    rule = db.query(ProbeRule).filter(ProbeRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    return _rule_to_response(rule, db)
+
+
+@app.post("/api/rules", response_model=ProbeRuleResponse)
+def create_rule(rule_create: ProbeRuleCreate, db: Session = Depends(get_db)):
+    now = datetime.utcnow()
+
+    rule = ProbeRule(
+        name=rule_create.name,
+        description=rule_create.description,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(rule)
+    db.flush()
+
+    version = ProbeRuleVersion(
+        rule_id=rule.id,
+        version=1,
+        execution_mode=rule_create.execution_mode or "sequence",
+        created_at=now,
+    )
+    db.add(version)
+    db.flush()
+
+    for idx, step_data in enumerate(rule_create.steps):
+        step = ProbeRuleStep(
+            version_id=version.id,
+            step_order=step_data.step_order if step_data.step_order != 0 else idx,
+            name=step_data.name,
+            step_type=step_data.step_type,
+            config=step_data.config,
+            timeout=step_data.timeout,
+            pass_condition=step_data.pass_condition,
+            created_at=now,
+        )
+        db.add(step)
+
+    db.flush()
+    rule.current_version_id = version.id
+    db.commit()
+
+    db.refresh(rule)
+    return _rule_to_response(rule, db)
+
+
+@app.put("/api/rules/{rule_id}", response_model=ProbeRuleResponse)
+def update_rule(rule_id: int, rule_update: ProbeRuleUpdate, db: Session = Depends(get_db)):
+    rule = db.query(ProbeRule).filter(ProbeRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    now = datetime.utcnow()
+    needs_new_version = rule_update.execution_mode is not None or rule_update.steps is not None
+
+    if rule_update.name is not None:
+        rule.name = rule_update.name
+    if rule_update.description is not None:
+        rule.description = rule_update.description
+
+    if needs_new_version:
+        last_version = db.query(ProbeRuleVersion).filter(
+            ProbeRuleVersion.rule_id == rule.id
+        ).order_by(ProbeRuleVersion.version.desc()).first()
+        new_version_num = (last_version.version + 1) if last_version else 1
+
+        execution_mode = rule_update.execution_mode
+        if execution_mode is None and last_version:
+            execution_mode = last_version.execution_mode
+        if execution_mode is None:
+            execution_mode = "sequence"
+
+        new_version = ProbeRuleVersion(
+            rule_id=rule.id,
+            version=new_version_num,
+            execution_mode=execution_mode,
+            created_at=now,
+        )
+        db.add(new_version)
+        db.flush()
+
+        if rule_update.steps is not None:
+            for idx, step_data in enumerate(rule_update.steps):
+                step = ProbeRuleStep(
+                    version_id=new_version.id,
+                    step_order=step_data.step_order if step_data.step_order != 0 else idx,
+                    name=step_data.name,
+                    step_type=step_data.step_type,
+                    config=step_data.config,
+                    timeout=step_data.timeout,
+                    pass_condition=step_data.pass_condition,
+                    created_at=now,
+                )
+                db.add(step)
+        elif last_version:
+            for old_step in sorted(last_version.steps, key=lambda x: x.step_order):
+                step = ProbeRuleStep(
+                    version_id=new_version.id,
+                    step_order=old_step.step_order,
+                    name=old_step.name,
+                    step_type=old_step.step_type,
+                    config=old_step.config,
+                    timeout=old_step.timeout,
+                    pass_condition=old_step.pass_condition,
+                    created_at=now,
+                )
+                db.add(step)
+
+        db.flush()
+        rule.current_version_id = new_version.id
+
+    rule.updated_at = now
+    db.commit()
+    db.refresh(rule)
+    return _rule_to_response(rule, db)
+
+
+@app.delete("/api/rules/{rule_id}")
+def delete_rule(rule_id: int, db: Session = Depends(get_db)):
+    rule = db.query(ProbeRule).filter(ProbeRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    bound_targets = db.query(ProbeTarget).filter(ProbeTarget.rule_id == rule_id).all()
+    for t in bound_targets:
+        t.rule_id = None
+
+    db.delete(rule)
+    db.commit()
+    return {"message": "Rule deleted"}
+
+
+@app.get("/api/targets/{target_id}/rule-executions")
+def get_target_rule_executions(
+    target_id: int,
+    limit: int = 50,
+    db: Session = Depends(get_db)
+):
+    target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    executions = db.query(ProbeRuleExecution).options(
+        joinedload(ProbeRuleExecution.step_executions),
+        joinedload(ProbeRuleExecution.version),
+    ).filter(
+        ProbeRuleExecution.target_id == target_id
+    ).order_by(ProbeRuleExecution.timestamp.desc()).limit(limit).all()
+
+    result = []
+    for exec in reversed(executions):
+        step_execs = []
+        step_map = {}
+        for se in exec.step_executions:
+            step_execs.append({
+                "id": se.id,
+                "rule_execution_id": se.rule_execution_id,
+                "step_id": se.step_id,
+                "step_name": None,
+                "step_type": None,
+                "timestamp": se.timestamp,
+                "success": se.success,
+                "latency_ms": se.latency_ms,
+                "error_message": se.error_message,
+                "raw_response": se.raw_response,
+            })
+            step_map[se.step_id] = len(step_execs) - 1
+
+        if exec.version:
+            for step in exec.version.steps:
+                if step.id in step_map:
+                    idx = step_map[step.id]
+                    step_execs[idx]["step_name"] = step.name
+                    step_execs[idx]["step_type"] = step.step_type
+
+        failed_step_name = None
+        if exec.failed_step_id and exec.version:
+            for step in exec.version.steps:
+                if step.id == exec.failed_step_id:
+                    failed_step_name = step.name
+                    break
+
+        result.append({
+            "id": exec.id,
+            "target_id": exec.target_id,
+            "version_id": exec.version_id,
+            "version": exec.version.version if exec.version else None,
+            "execution_mode": exec.version.execution_mode if exec.version else None,
+            "timestamp": exec.timestamp,
+            "success": exec.success,
+            "latency_ms": exec.latency_ms,
+            "error_message": exec.error_message,
+            "failed_step_id": exec.failed_step_id,
+            "failed_step_name": failed_step_name,
+            "step_executions": step_execs,
+        })
+
+    return result
+
+
+@app.get("/api/targets/{target_id}/rule")
+def get_target_current_rule(target_id: int, db: Session = Depends(get_db)):
+    target = db.query(ProbeTarget).options(
+        joinedload(ProbeTarget.rule)
+    ).filter(ProbeTarget.id == target_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    if not target.rule:
+        return {"rule": None, "version": None, "steps": []}
+
+    rule = target.rule
+    version = None
+    steps = []
+
+    if rule.current_version_id:
+        version = db.query(ProbeRuleVersion).filter(
+            ProbeRuleVersion.id == rule.current_version_id
+        ).first()
+    if not version:
+        version = db.query(ProbeRuleVersion).filter(
+            ProbeRuleVersion.rule_id == rule.id
+        ).order_by(ProbeRuleVersion.version.desc()).first()
+
+    if version:
+        step_list = db.query(ProbeRuleStep).filter(
+            ProbeRuleStep.version_id == version.id
+        ).order_by(ProbeRuleStep.step_order.asc()).all()
+
+        step_ids = [s.id for s in step_list]
+        last_executions = {}
+        if step_ids:
+            from sqlalchemy import text as sqltext
+            for sid in step_ids:
+                last = db.query(ProbeRuleStepExecution).filter(
+                    ProbeRuleStepExecution.step_id == sid
+                ).order_by(ProbeRuleStepExecution.timestamp.desc()).first()
+                if last:
+                    last_executions[sid] = {
+                        "success": last.success,
+                        "latency_ms": last.latency_ms,
+                        "error_message": last.error_message,
+                        "timestamp": last.timestamp,
+                    }
+
+        for s in step_list:
+            steps.append({
+                "id": s.id,
+                "step_order": s.step_order,
+                "name": s.name,
+                "step_type": s.step_type,
+                "config": s.config,
+                "timeout": s.timeout,
+                "pass_condition": s.pass_condition,
+                "last_execution": last_executions.get(s.id),
+            })
+
+    return {
+        "rule": _rule_to_response(rule, db),
+        "version": {
+            "id": version.id,
+            "version": version.version,
+            "execution_mode": version.execution_mode,
+            "created_at": version.created_at,
+        } if version else None,
+        "steps": steps,
+        "execution_mode": version.execution_mode if version else None,
+    }
+
+
+@app.get("/api/steps/{step_id}/history")
+def get_step_history(
+    step_id: int,
+    limit: int = 10,
+    db: Session = Depends(get_db)
+):
+    step = db.query(ProbeRuleStep).filter(ProbeRuleStep.id == step_id).first()
+    if not step:
+        raise HTTPException(status_code=404, detail="Step not found")
+
+    executions = db.query(ProbeRuleStepExecution).filter(
+        ProbeRuleStepExecution.step_id == step_id
+    ).order_by(ProbeRuleStepExecution.timestamp.desc()).limit(limit).all()
+
+    return {
+        "step_id": step.id,
+        "step_name": step.name,
+        "step_type": step.step_type,
+        "executions": [
+            {
+                "id": e.id,
+                "rule_execution_id": e.rule_execution_id,
+                "step_id": e.step_id,
+                "step_name": step.name,
+                "step_type": step.step_type,
+                "timestamp": e.timestamp,
+                "success": e.success,
+                "latency_ms": e.latency_ms,
+                "error_message": e.error_message,
+                "raw_response": e.raw_response,
+            }
+            for e in executions
+        ],
+    }
+
+
 @app.get("/api/groups", response_model=List[ProbeGroupResponse])
 def list_groups(db: Session = Depends(get_db)):
     groups = db.query(ProbeGroup).order_by(ProbeGroup.id.asc()).all()
@@ -534,36 +1167,44 @@ def apply_group_thresholds(group_id: int, db: Session = Depends(get_db)):
 
 @app.get("/api/targets", response_model=List[ProbeTargetResponse])
 def list_targets(db: Session = Depends(get_db)):
-    from sqlalchemy.orm import joinedload
-    targets = db.query(ProbeTarget).options(joinedload(ProbeTarget.group)).order_by(ProbeTarget.id.asc()).all()
-    return [_enrich_target(t) for t in targets]
+    targets = db.query(ProbeTarget).options(
+        joinedload(ProbeTarget.group),
+        joinedload(ProbeTarget.rule),
+    ).order_by(ProbeTarget.id.asc()).all()
+    return [_enrich_target(t, db) for t in targets]
 
 
 @app.post("/api/targets", response_model=ProbeTargetResponse)
 def create_target(target: ProbeTargetCreate, db: Session = Depends(get_db)):
-    from sqlalchemy.orm import joinedload
     db_target = ProbeTarget(**target.model_dump())
     db.add(db_target)
     db.commit()
     db.refresh(db_target)
     probe_engine.add_target(db_target.id)
-    db_target = db.query(ProbeTarget).options(joinedload(ProbeTarget.group)).filter(ProbeTarget.id == db_target.id).first()
-    return _enrich_target(db_target)
+    db_target = db.query(ProbeTarget).options(
+        joinedload(ProbeTarget.group),
+        joinedload(ProbeTarget.rule),
+    ).filter(ProbeTarget.id == db_target.id).first()
+    return _enrich_target(db_target, db)
 
 
 @app.get("/api/targets/{target_id}", response_model=ProbeTargetResponse)
 def get_target(target_id: int, db: Session = Depends(get_db)):
-    from sqlalchemy.orm import joinedload
-    target = db.query(ProbeTarget).options(joinedload(ProbeTarget.group)).filter(ProbeTarget.id == target_id).first()
+    target = db.query(ProbeTarget).options(
+        joinedload(ProbeTarget.group),
+        joinedload(ProbeTarget.rule),
+    ).filter(ProbeTarget.id == target_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="Target not found")
-    return _enrich_target(target)
+    return _enrich_target(target, db)
 
 
 @app.put("/api/targets/{target_id}", response_model=ProbeTargetResponse)
 def update_target(target_id: int, target_update: ProbeTargetUpdate, db: Session = Depends(get_db)):
-    from sqlalchemy.orm import joinedload
-    target = db.query(ProbeTarget).options(joinedload(ProbeTarget.group)).filter(ProbeTarget.id == target_id).first()
+    target = db.query(ProbeTarget).options(
+        joinedload(ProbeTarget.group),
+        joinedload(ProbeTarget.rule),
+    ).filter(ProbeTarget.id == target_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="Target not found")
 
@@ -579,7 +1220,7 @@ def update_target(target_id: int, target_update: ProbeTargetUpdate, db: Session 
     if "paused" in update_data and old_paused != target.paused:
         probe_engine.toggle_target(target.id, target.paused)
 
-    return _enrich_target(target)
+    return _enrich_target(target, db)
 
 
 @app.delete("/api/targets/{target_id}")

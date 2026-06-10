@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 
@@ -56,6 +56,7 @@ class ProbeTargetCreate(BaseModel):
     type: str
     address: str
     group_id: Optional[int] = None
+    rule_id: Optional[int] = None
     interval: int = Field(ge=5, le=300, default=30)
     timeout: int = Field(ge=1, le=60, default=5)
     expected_status: Optional[str] = None
@@ -74,6 +75,7 @@ class ProbeTargetUpdate(BaseModel):
     type: Optional[str] = None
     address: Optional[str] = None
     group_id: Optional[int] = None
+    rule_id: Optional[int] = None
     interval: Optional[int] = Field(None, ge=5, le=300)
     timeout: Optional[int] = Field(None, ge=1, le=60)
     expected_status: Optional[str] = None
@@ -92,6 +94,8 @@ class ProbeTargetUpdate(BaseModel):
 class ProbeTargetResponse(BaseModel):
     id: int
     group_id: Optional[int] = None
+    rule_id: Optional[int] = None
+    rule_name: Optional[str] = None
     name: str
     type: str
     address: str
@@ -200,3 +204,115 @@ class CascadeSimulationResponse(BaseModel):
     source_target_id: int
     affected_target_ids: List[int]
     affected_target_names: List[str]
+
+
+class ProbeRuleStepCreate(BaseModel):
+    step_order: int = 0
+    name: str
+    step_type: str
+    config: Optional[Dict[str, Any]] = None
+    timeout: int = Field(5, ge=1, le=120)
+    pass_condition: Optional[Dict[str, Any]] = None
+
+
+class ProbeRuleStepResponse(BaseModel):
+    id: int
+    version_id: int
+    step_order: int
+    name: str
+    step_type: str
+    config: Optional[Dict[str, Any]] = None
+    timeout: int
+    pass_condition: Optional[Dict[str, Any]] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ProbeRuleVersionCreate(BaseModel):
+    execution_mode: str = "sequence"
+    steps: List[ProbeRuleStepCreate]
+
+
+class ProbeRuleVersionResponse(BaseModel):
+    id: int
+    rule_id: int
+    version: int
+    execution_mode: str
+    created_at: datetime
+    steps: List[ProbeRuleStepResponse] = []
+
+    class Config:
+        from_attributes = True
+
+
+class ProbeRuleCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    execution_mode: str = "sequence"
+    steps: List[ProbeRuleStepCreate] = []
+
+
+class ProbeRuleUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    execution_mode: Optional[str] = None
+    steps: Optional[List[ProbeRuleStepCreate]] = None
+
+
+class ProbeRuleResponse(BaseModel):
+    id: int
+    name: str
+    description: Optional[str] = None
+    current_version_id: Optional[int] = None
+    current_version: Optional[int] = None
+    execution_mode: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    versions: List[ProbeRuleVersionResponse] = []
+    bound_target_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class ProbeRuleStepExecutionResponse(BaseModel):
+    id: int
+    rule_execution_id: int
+    step_id: int
+    step_name: Optional[str] = None
+    step_type: Optional[str] = None
+    timestamp: datetime
+    success: bool
+    latency_ms: Optional[float]
+    error_message: Optional[str]
+    raw_response: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+
+class ProbeRuleExecutionResponse(BaseModel):
+    id: int
+    target_id: int
+    version_id: int
+    version: Optional[int] = None
+    execution_mode: Optional[str] = None
+    timestamp: datetime
+    success: bool
+    latency_ms: Optional[float]
+    error_message: Optional[str]
+    failed_step_id: Optional[int] = None
+    failed_step_name: Optional[str] = None
+    step_executions: List[ProbeRuleStepExecutionResponse] = []
+
+    class Config:
+        from_attributes = True
+
+
+class ProbeRuleStepHistoryResponse(BaseModel):
+    step_id: int
+    step_name: str
+    step_type: str
+    executions: List[ProbeRuleStepExecutionResponse] = []

@@ -1,11 +1,14 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
-function AddTargetModal({ onClose, onSubmit, groups = [] }) {
+const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
+
+function AddTargetModal({ onClose, onSubmit, groups = [], rules = [] }) {
   const [formData, setFormData] = useState({
     name: '',
     type: 'http',
     address: '',
     group_id: '',
+    rule_id: '',
     interval: 30,
     timeout: 5,
     expected_status: '200',
@@ -23,7 +26,7 @@ function AddTargetModal({ onClose, onSubmit, groups = [] }) {
       parsedValue = checked;
     } else if (name === 'interval' || name === 'timeout' || name === 'slow_interval' || name === 'fast_interval') {
       parsedValue = Number(value);
-    } else if (name === 'group_id') {
+    } else if (name === 'group_id' || name === 'rule_id') {
       parsedValue = value === '' ? null : Number(value);
     }
     setFormData(prev => ({
@@ -43,6 +46,9 @@ function AddTargetModal({ onClose, onSubmit, groups = [] }) {
     if (data.group_id === null) {
       delete data.group_id;
     }
+    if (data.rule_id === null) {
+      delete data.rule_id;
+    }
     if (!data.silent_start || !data.silent_end) {
       delete data.silent_start;
       delete data.silent_end;
@@ -53,6 +59,8 @@ function AddTargetModal({ onClose, onSubmit, groups = [] }) {
     }
     onSubmit(data);
   };
+
+  const hasRule = !!formData.rule_id;
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -89,52 +97,106 @@ function AddTargetModal({ onClose, onSubmit, groups = [] }) {
             </div>
           )}
 
-          <div className="form-row">
+          {rules.length > 0 && (
             <div className="form-group">
-              <label>类型</label>
+              <label>绑定探测规则（可选，使用规则编排引擎）</label>
               <select
-                name="type"
-                value={formData.type}
+                name="rule_id"
+                value={formData.rule_id === null ? '' : formData.rule_id}
                 onChange={handleChange}
               >
-                <option value="http">HTTP</option>
-                <option value="tcp">TCP</option>
+                <option value="">不使用规则（使用传统简单探测）</option>
+                {rules.map(rule => (
+                  <option key={rule.id} value={rule.id}>
+                    {rule.name} (v{rule.current_version || 1})
+                  </option>
+                ))}
               </select>
+              <span className="form-hint">
+                {hasRule
+                  ? `✅ 将使用规则编排引擎执行多步骤探测`
+                  : '不绑定规则则使用传统的简单 HTTP/TCP 探测方式'}
+              </span>
             </div>
-            <div className="form-group">
-              <label>超时时间 (秒)</label>
-              <input
-                type="number"
-                name="timeout"
-                min="1"
-                max="60"
-                value={formData.timeout}
-                onChange={handleChange}
-              />
-            </div>
-          </div>
+          )}
 
-          <div className="form-group">
-            <label>{formData.type === 'http' ? 'URL 地址' : '地址 (host:port)'}</label>
-            <input
-              type="text"
-              name="address"
-              value={formData.address}
-              placeholder={formData.type === 'http' ? 'https://example.com' : 'example.com:80'}
-              required
-            />
-          </div>
+          {!hasRule && (
+            <>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>类型</label>
+                  <select
+                    name="type"
+                    value={formData.type}
+                    onChange={handleChange}
+                  >
+                    <option value="http">HTTP</option>
+                    <option value="tcp">TCP</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>超时时间 (秒)</label>
+                  <input
+                    type="number"
+                    name="timeout"
+                    min="1"
+                    max="60"
+                    value={formData.timeout}
+                    onChange={handleChange}
+                  />
+                </div>
+              </div>
 
-          {formData.type === 'http' && (
-            <div className="form-group">
-              <label>期望状态码</label>
-              <input
-                type="text"
-                name="expected_status"
-                value={formData.expected_status}
-                onChange={handleChange}
-                placeholder="200,201 或 200-399"
-              />
+              <div className="form-group">
+                <label>{formData.type === 'http' ? 'URL 地址' : '地址 (host:port)'}</label>
+                <input
+                  type="text"
+                  name="address"
+                  value={formData.address}
+                  placeholder={formData.type === 'http' ? 'https://example.com' : 'example.com:80'}
+                  required
+                />
+              </div>
+
+              {formData.type === 'http' && (
+                <div className="form-group">
+                  <label>期望状态码</label>
+                  <input
+                    type="text"
+                    name="expected_status"
+                    value={formData.expected_status}
+                    onChange={handleChange}
+                    placeholder="200,201 或 200-399"
+                  />
+                </div>
+              )}
+            </>
+          )}
+
+          {hasRule && (
+            <div className="form-row">
+              <div className="form-group">
+                <label>类型（规则探测时仅作为标识）</label>
+                <select
+                  name="type"
+                  value={formData.type}
+                  onChange={handleChange}
+                >
+                  <option value="http">HTTP</option>
+                  <option value="tcp">TCP</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label>地址（规则探测时仅作为标识）</label>
+                <input
+                  type="text"
+                  name="address"
+                  value={formData.address}
+                  onChange={handleChange}
+                  placeholder="规则探测时填入任意地址作为描述"
+                  required
+                />
+              </div>
             </div>
           )}
 

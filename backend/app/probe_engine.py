@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from .database import SessionLocal
 from .models import ProbeTarget, ProbeResult, Alert, Dependency
+from .rule_engine import rule_engine
 from collections import deque
 
 
@@ -144,6 +145,9 @@ class ProbeEngine:
             await asyncio.sleep(current_interval if current_interval else target.interval)
 
     async def _execute_probe(self, target: ProbeTarget) -> dict:
+        if target.rule_id:
+            return await self._execute_rule_probe(target)
+
         start_time = time.time()
         success = False
         error_message = None
@@ -169,6 +173,10 @@ class ProbeEngine:
             "error_message": error_message,
             "timestamp": datetime.utcnow()
         }
+
+    async def _execute_rule_probe(self, target: ProbeTarget) -> dict:
+        result = await rule_engine.execute_rule(target)
+        return result
 
     async def _probe_http(self, target: ProbeTarget) -> tuple:
         url = target.address
@@ -509,11 +517,17 @@ class ProbeEngine:
         if target.cascade_source_id and target.cascade_source:
             cascade_source_name = target.cascade_source.name
 
+        rule_name = None
+        if target.rule_id and target.rule:
+            rule_name = target.rule.name
+
         data = {
             "type": "status_update",
             "target": {
                 "id": target.id,
                 "group_id": target.group_id,
+                "rule_id": target.rule_id,
+                "rule_name": rule_name,
                 "name": target.name,
                 "type": target.type,
                 "address": target.address,
@@ -567,10 +581,13 @@ class ProbeEngine:
             "type": "probe_result",
             "target_id": target.id,
             "result": {
-                "timestamp": result["timestamp"].isoformat(),
+                "timestamp": result["timestamp"].isoformat() if isinstance(result["timestamp"], datetime) else result["timestamp"],
                 "success": result["success"],
                 "latency_ms": result["latency_ms"],
-                "error_message": result["error_message"]
+                "error_message": result["error_message"],
+                "has_rule": target.rule_id is not None,
+                "step_results": result.get("step_results", []),
+                "rule_execution_id": result.get("rule_execution_id"),
             }
         }
         for callback in self.result_callbacks:
