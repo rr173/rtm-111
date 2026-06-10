@@ -59,13 +59,8 @@ class ProbeEngine:
         self.tasks.clear()
 
     def add_target(self, target_id: int):
-        db = SessionLocal()
-        try:
-            target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
-            if target and not target.paused and target_id not in self.tasks:
-                self._start_target_task_sync(target_id)
-        finally:
-            db.close()
+        if target_id not in self.tasks:
+            self._start_target_task_sync(target_id)
 
     def remove_target(self, target_id: int):
         if target_id in self.tasks:
@@ -298,7 +293,7 @@ class ProbeEngine:
                     target.cascade_source_id = upstream_target.id
                     if not target.paused:
                         target.paused = True
-                        self.toggle_target(target.id, True)
+                        self.remove_target(target.id)
                     db.flush()
                     db.refresh(target)
                     self._notify_status_change(target)
@@ -314,7 +309,7 @@ class ProbeEngine:
                     target.cascade_source_id = None
                     if target.paused:
                         target.paused = False
-                        self.toggle_target(target.id, False)
+                        self._start_target_task_sync(target.id)
                     db.flush()
                     db.refresh(target)
                     self._notify_status_change(target)

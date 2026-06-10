@@ -816,14 +816,35 @@ def delete_dependency(dep_id: int, db: Session = Depends(get_db)):
     if not dep:
         raise HTTPException(status_code=404, detail="Dependency not found")
 
-    upstream_id = dep.upstream_id
+    downstream_id = dep.downstream_id
+    downstream_target = db.query(ProbeTarget).filter(
+        ProbeTarget.id == downstream_id
+    ).first()
+
+    affected_target_ids = []
+    if downstream_target and downstream_target.cascade_affected:
+        affected = _get_downstream_targets(db, downstream_id)
+        affected_target_ids = [t.id for t in affected]
+        affected_target_ids.append(downstream_id)
+
     db.delete(dep)
     db.commit()
 
-    upstream = db.query(ProbeTarget).filter(ProbeTarget.id == upstream_id).first()
-    if upstream:
-        _update_cascade_status(db, upstream)
-        db.commit()
+    for target_id in affected_target_ids:
+        target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+        if target and target.cascade_affected:
+            upstreams = _get_upstream_targets(db, target_id)
+            has_failed_upstream = any(
+                u.status in ("down", "degraded") for u in upstreams
+            )
+            if not has_failed_upstream:
+                target.cascade_affected = False
+                target.cascade_source_id = None
+                if target.paused:
+                    target.paused = False
+                    probe_engine.add_target(target.id)
+
+    db.commit()
 
     manager.broadcast_dependencies()
     manager.broadcast_targets()
