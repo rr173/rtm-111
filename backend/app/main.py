@@ -10,6 +10,7 @@ from .models import (
     ProbeTarget, ProbeResult, Alert, ProbeGroup, Dependency,
     ProbeRule, ProbeRuleVersion, ProbeRuleStep,
     ProbeRuleExecution, ProbeRuleStepExecution,
+    Snapshot, SnapshotData, SnapshotAlert,
 )
 from .schemas import (
     ProbeTargetCreate, ProbeTargetUpdate, ProbeTargetResponse,
@@ -22,6 +23,8 @@ from .schemas import (
     ProbeRuleVersionResponse, ProbeRuleStepResponse,
     ProbeRuleExecutionResponse, ProbeRuleStepExecutionResponse,
     ProbeRuleStepHistoryResponse,
+    SnapshotCreate, SnapshotUpdate, SnapshotResponse,
+    SnapshotDetailResponse, SnapshotComparisonResponse,
 )
 from .probe_engine import probe_engine
 from .websocket_manager import manager, get_target_history
@@ -229,6 +232,75 @@ def _migrate_database():
                 conn.execute(text("CREATE INDEX idx_dependencies_upstream ON dependencies(upstream_id)"))
                 conn.execute(text("CREATE INDEX idx_dependencies_downstream ON dependencies(downstream_id)"))
                 print("Created dependencies table")
+
+            snapshot_tables = {
+                "snapshots": """
+                    CREATE TABLE snapshots (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name VARCHAR(255) NOT NULL,
+                        description VARCHAR(1024),
+                        start_time DATETIME NOT NULL,
+                        end_time DATETIME NOT NULL,
+                        target_count INTEGER DEFAULT 0,
+                        data_point_count INTEGER DEFAULT 0,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """,
+                "snapshot_data": """
+                    CREATE TABLE snapshot_data (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        snapshot_id INTEGER NOT NULL,
+                        target_id INTEGER NOT NULL,
+                        target_name VARCHAR(255) NOT NULL,
+                        timestamp DATETIME NOT NULL,
+                        status VARCHAR(20) NOT NULL,
+                        latency_ms REAL,
+                        success INTEGER NOT NULL,
+                        consecutive_failures INTEGER DEFAULT 0,
+                        consecutive_successes INTEGER DEFAULT 0,
+                        error_message TEXT,
+                        FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
+                    )
+                """,
+                "snapshot_alerts": """
+                    CREATE TABLE snapshot_alerts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        snapshot_id INTEGER NOT NULL,
+                        target_id INTEGER NOT NULL,
+                        target_name VARCHAR(255) NOT NULL,
+                        timestamp DATETIME NOT NULL,
+                        from_status VARCHAR(20) NOT NULL,
+                        to_status VARCHAR(20) NOT NULL,
+                        FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
+                    )
+                """,
+            }
+
+            for table_name, create_sql in snapshot_tables.items():
+                result = conn.execute(text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"))
+                if not result.fetchone():
+                    conn.execute(text(create_sql))
+                    index_sqls = {
+                        "snapshots": [
+                            "CREATE INDEX idx_snapshots_start_time ON snapshots(start_time)",
+                            "CREATE INDEX idx_snapshots_end_time ON snapshots(end_time)",
+                            "CREATE INDEX idx_snapshots_created_at ON snapshots(created_at)",
+                        ],
+                        "snapshot_data": [
+                            "CREATE INDEX idx_snapshot_data_snapshot_id ON snapshot_data(snapshot_id)",
+                            "CREATE INDEX idx_snapshot_data_target_id ON snapshot_data(target_id)",
+                            "CREATE INDEX idx_snapshot_data_timestamp ON snapshot_data(timestamp)",
+                        ],
+                        "snapshot_alerts": [
+                            "CREATE INDEX idx_snapshot_alerts_snapshot_id ON snapshot_alerts(snapshot_id)",
+                            "CREATE INDEX idx_snapshot_alerts_target_id ON snapshot_alerts(target_id)",
+                            "CREATE INDEX idx_snapshot_alerts_timestamp ON snapshot_alerts(timestamp)",
+                        ],
+                    }
+                    if table_name in index_sqls:
+                        for idx_sql in index_sqls[table_name]:
+                            conn.execute(text(idx_sql))
+                    print(f"Created table {table_name}")
 
             conn.commit()
         except Exception as e:
@@ -1516,3 +1588,349 @@ async def websocket_endpoint(websocket: WebSocket):
             pass
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+
+
+def _calculate_stats(results):
+    if not results:
+        return {"availability": 0, "p50": 0, "p95": 0, "p99": 0}
+    
+    success_count = sum(1 for r in results if r.success)
+    availability = (success_count / len(results)) * 100
+    
+    latencies = [r.latency_ms for r in results if r.success and r.latency_ms is not None]
+    latencies.sort()
+    
+    p50 = p95 = p99 = 0
+    if latencies:
+        n = len(latencies)
+        p50 = latencies[int(n * 0.5)] if n > 0 else 0
+        p95 = latencies[int(n * 0.95)] if n > 0 else 0
+        p99 = latencies[int(n * 0.99)] if n > 0 else 0
+    
+    return {"availability": availability, "p50": p50, "p95": p95, "p99": p99}
+
+
+@app.get("/api/snapshots", response_model=List[SnapshotResponse])
+def list_snapshots(
+    search: str = "",
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
+    db: Session = Depends(get_db)
+):
+    query = db.query(Snapshot)
+    
+    if search:
+        search_pattern = f"%{search}%"
+        query = query.filter(
+            (Snapshot.name.like(search_pattern)) |
+            (Snapshot.description.like(search_pattern))
+        )
+    
+    if sort_by == "created_at":
+        order_column = Snapshot.created_at
+    elif sort_by == "start_time":
+        order_column = Snapshot.start_time
+    elif sort_by == "name":
+        order_column = Snapshot.name
+    else:
+        order_column = Snapshot.created_at
+    
+    if sort_order == "desc":
+        query = query.order_by(order_column.desc())
+    else:
+        query = query.order_by(order_column.asc())
+    
+    return query.all()
+
+
+@app.post("/api/snapshots", response_model=SnapshotResponse)
+def create_snapshot(snapshot_create: SnapshotCreate, db: Session = Depends(get_db)):
+    now = datetime.utcnow()
+    
+    snapshot = Snapshot(
+        name=snapshot_create.name,
+        description=snapshot_create.description,
+        start_time=snapshot_create.start_time,
+        end_time=snapshot_create.end_time,
+        created_at=now
+    )
+    db.add(snapshot)
+    db.flush()
+    
+    results = db.query(ProbeResult).options(
+        joinedload(ProbeResult.target)
+    ).filter(
+        ProbeResult.timestamp >= snapshot_create.start_time,
+        ProbeResult.timestamp <= snapshot_create.end_time
+    ).order_by(ProbeResult.timestamp.asc()).all()
+    
+    target_ids = set()
+    for result in results:
+        if result.target:
+            target_ids.add(result.target_id)
+            snapshot_data = SnapshotData(
+                snapshot_id=snapshot.id,
+                target_id=result.target_id,
+                target_name=result.target.name,
+                timestamp=result.timestamp,
+                status=result.target.status if result.target else "unknown",
+                latency_ms=result.latency_ms,
+                success=result.success,
+                consecutive_failures=result.target.consecutive_failures if result.target else 0,
+                consecutive_successes=result.target.consecutive_successes if result.target else 0,
+                error_message=result.error_message
+            )
+            db.add(snapshot_data)
+    
+    alerts = db.query(Alert).options(
+        joinedload(Alert.target)
+    ).filter(
+        Alert.timestamp >= snapshot_create.start_time,
+        Alert.timestamp <= snapshot_create.end_time
+    ).all()
+    
+    for alert in alerts:
+        if alert.target:
+            snapshot_alert = SnapshotAlert(
+                snapshot_id=snapshot.id,
+                target_id=alert.target_id,
+                target_name=alert.target.name,
+                timestamp=alert.timestamp,
+                from_status=alert.from_status,
+                to_status=alert.to_status
+            )
+            db.add(snapshot_alert)
+    
+    snapshot.target_count = len(target_ids)
+    snapshot.data_point_count = len(results)
+    
+    db.commit()
+    db.refresh(snapshot)
+    
+    return snapshot
+
+
+@app.get("/api/snapshots/{snapshot_id}", response_model=SnapshotDetailResponse)
+def get_snapshot(snapshot_id: int, db: Session = Depends(get_db)):
+    snapshot = db.query(Snapshot).filter(Snapshot.id == snapshot_id).first()
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    
+    data = db.query(SnapshotData).filter(
+        SnapshotData.snapshot_id == snapshot_id
+    ).order_by(SnapshotData.timestamp.asc()).all()
+    
+    alerts = db.query(SnapshotAlert).filter(
+        SnapshotAlert.snapshot_id == snapshot_id
+    ).order_by(SnapshotAlert.timestamp.asc()).all()
+    
+    return {
+        "id": snapshot.id,
+        "name": snapshot.name,
+        "description": snapshot.description,
+        "start_time": snapshot.start_time,
+        "end_time": snapshot.end_time,
+        "target_count": snapshot.target_count,
+        "data_point_count": snapshot.data_point_count,
+        "created_at": snapshot.created_at,
+        "data": data,
+        "alerts": alerts
+    }
+
+
+@app.put("/api/snapshots/{snapshot_id}", response_model=SnapshotResponse)
+def update_snapshot(snapshot_id: int, snapshot_update: SnapshotUpdate, db: Session = Depends(get_db)):
+    snapshot = db.query(Snapshot).filter(Snapshot.id == snapshot_id).first()
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    
+    if snapshot_update.name is not None:
+        snapshot.name = snapshot_update.name
+    if snapshot_update.description is not None:
+        snapshot.description = snapshot_update.description
+    
+    db.commit()
+    db.refresh(snapshot)
+    
+    return snapshot
+
+
+@app.delete("/api/snapshots/{snapshot_id}")
+def delete_snapshot(snapshot_id: int, db: Session = Depends(get_db)):
+    snapshot = db.query(Snapshot).filter(Snapshot.id == snapshot_id).first()
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    
+    db.delete(snapshot)
+    db.commit()
+    
+    return {"message": "Snapshot deleted"}
+
+
+@app.get("/api/snapshots/{snapshot_id}/timeline")
+def get_snapshot_timeline(snapshot_id: int, db: Session = Depends(get_db)):
+    snapshot = db.query(Snapshot).filter(Snapshot.id == snapshot_id).first()
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    
+    data = db.query(SnapshotData).filter(
+        SnapshotData.snapshot_id == snapshot_id
+    ).order_by(SnapshotData.timestamp.asc()).all()
+    
+    timeline = {}
+    for d in data:
+        ts = d.timestamp.isoformat()
+        if ts not in timeline:
+            timeline[ts] = {}
+        timeline[ts][d.target_name] = {
+            "target_id": d.target_id,
+            "status": d.status,
+            "latency_ms": d.latency_ms,
+            "success": d.success,
+            "consecutive_failures": d.consecutive_failures,
+            "consecutive_successes": d.consecutive_successes,
+            "error_message": d.error_message
+        }
+    
+    alerts = db.query(SnapshotAlert).filter(
+        SnapshotAlert.snapshot_id == snapshot_id
+    ).order_by(SnapshotAlert.timestamp.asc()).all()
+    
+    alert_list = []
+    for a in alerts:
+        alert_list.append({
+            "timestamp": a.timestamp.isoformat(),
+            "target_id": a.target_id,
+            "target_name": a.target_name,
+            "from_status": a.from_status,
+            "to_status": a.to_status
+        })
+    
+    return {
+        "snapshot_id": snapshot_id,
+        "start_time": snapshot.start_time.isoformat(),
+        "end_time": snapshot.end_time.isoformat(),
+        "timeline": timeline,
+        "alerts": alert_list
+    }
+
+
+@app.get("/api/snapshots/{snapshot_id}/targets/{target_name}/stats")
+def get_snapshot_target_stats(snapshot_id: int, target_name: str, db: Session = Depends(get_db)):
+    snapshot = db.query(Snapshot).filter(Snapshot.id == snapshot_id).first()
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    
+    data = db.query(SnapshotData).filter(
+        SnapshotData.snapshot_id == snapshot_id,
+        SnapshotData.target_name == target_name
+    ).order_by(SnapshotData.timestamp.asc()).all()
+    
+    if not data:
+        raise HTTPException(status_code=404, detail="Target data not found in snapshot")
+    
+    results = data
+    stats = _calculate_stats(results)
+    
+    return {
+        "target_name": target_name,
+        "snapshot_id": snapshot_id,
+        "snapshot_name": snapshot.name,
+        "stats": stats,
+        "data_points": len(data),
+        "results": [
+            {
+                "timestamp": d.timestamp.isoformat(),
+                "status": d.status,
+                "latency_ms": d.latency_ms,
+                "success": d.success
+            }
+            for d in data
+        ]
+    }
+
+
+@app.get("/api/snapshots/compare/{snapshot_a_id}/{snapshot_b_id}")
+def compare_snapshots(snapshot_a_id: int, snapshot_b_id: int, db: Session = Depends(get_db)):
+    snapshot_a = db.query(Snapshot).filter(Snapshot.id == snapshot_a_id).first()
+    snapshot_b = db.query(Snapshot).filter(Snapshot.id == snapshot_b_id).first()
+    
+    if not snapshot_a or not snapshot_b:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    
+    data_a = db.query(SnapshotData).filter(
+        SnapshotData.snapshot_id == snapshot_a_id
+    ).all()
+    
+    data_b = db.query(SnapshotData).filter(
+        SnapshotData.snapshot_id == snapshot_b_id
+    ).all()
+    
+    targets_a = {}
+    targets_b = {}
+    
+    for d in data_a:
+        if d.target_name not in targets_a:
+            targets_a[d.target_name] = []
+        targets_a[d.target_name].append(d)
+    
+    for d in data_b:
+        if d.target_name not in targets_b:
+            targets_b[d.target_name] = []
+        targets_b[d.target_name].append(d)
+    
+    common_targets = set(targets_a.keys()) & set(targets_b.keys())
+    
+    comparisons = []
+    for target_name in common_targets:
+        results_a = targets_a[target_name]
+        results_b = targets_b[target_name]
+        
+        stats_a = _calculate_stats(results_a)
+        stats_b = _calculate_stats(results_b)
+        
+        diff = {
+            "availability": stats_b["availability"] - stats_a["availability"],
+            "p50": stats_b["p50"] - stats_a["p50"],
+            "p95": stats_b["p95"] - stats_a["p95"],
+            "p99": stats_b["p99"] - stats_a["p99"],
+        }
+        
+        comparisons.append({
+            "target_name": target_name,
+            "snapshot_a": {
+                "stats": stats_a,
+                "data_points": len(results_a),
+                "results": [
+                    {
+                        "timestamp": r.timestamp.isoformat(),
+                        "status": r.status,
+                        "latency_ms": r.latency_ms,
+                        "success": r.success
+                    }
+                    for r in results_a
+                ]
+            },
+            "snapshot_b": {
+                "stats": stats_b,
+                "data_points": len(results_b),
+                "results": [
+                    {
+                        "timestamp": r.timestamp.isoformat(),
+                        "status": r.status,
+                        "latency_ms": r.latency_ms,
+                        "success": r.success
+                    }
+                    for r in results_b
+                ]
+            },
+            "diff": diff,
+            "degraded": diff["availability"] < -5 or diff["p95"] > 100
+        })
+    
+    return {
+        "snapshot_a": snapshot_a,
+        "snapshot_b": snapshot_b,
+        "common_targets": sorted(list(common_targets)),
+        "comparisons": sorted(comparisons, key=lambda x: x["diff"]["availability"])
+    }

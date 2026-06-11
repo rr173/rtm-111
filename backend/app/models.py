@@ -200,3 +200,51 @@ class Alert(Base):
     acknowledged_at = Column(DateTime, nullable=True)
 
     target = relationship("ProbeTarget", back_populates="alerts")
+
+
+class Snapshot(Base):
+    __tablename__ = "snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(String(1024), nullable=True)
+    start_time = Column(DateTime, nullable=False, index=True)
+    end_time = Column(DateTime, nullable=False, index=True)
+    target_count = Column(Integer, default=0)
+    data_point_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    data = relationship("SnapshotData", back_populates="snapshot", cascade="all, delete-orphan")
+    alerts = relationship("SnapshotAlert", back_populates="snapshot", cascade="all, delete-orphan")
+
+
+class SnapshotData(Base):
+    __tablename__ = "snapshot_data"
+
+    id = Column(Integer, primary_key=True, index=True)
+    snapshot_id = Column(Integer, ForeignKey("snapshots.id"), nullable=False, index=True)
+    target_id = Column(Integer, nullable=False, index=True)
+    target_name = Column(String(255), nullable=False)
+    timestamp = Column(DateTime, nullable=False, index=True)
+    status = Column(String(20), nullable=False)
+    latency_ms = Column(Float, nullable=True)
+    success = Column(Boolean, nullable=False)
+    consecutive_failures = Column(Integer, default=0)
+    consecutive_successes = Column(Integer, default=0)
+    error_message = Column(Text, nullable=True)
+
+    snapshot = relationship("Snapshot", back_populates="data")
+
+
+class SnapshotAlert(Base):
+    __tablename__ = "snapshot_alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    snapshot_id = Column(Integer, ForeignKey("snapshots.id"), nullable=False, index=True)
+    target_id = Column(Integer, nullable=False, index=True)
+    target_name = Column(String(255), nullable=False)
+    timestamp = Column(DateTime, nullable=False, index=True)
+    from_status = Column(String(20), nullable=False)
+    to_status = Column(String(20), nullable=False)
+
+    snapshot = relationship("Snapshot", back_populates="alerts")

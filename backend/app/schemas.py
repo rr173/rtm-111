@@ -316,3 +316,72 @@ class ProbeRuleStepHistoryResponse(BaseModel):
     step_name: str
     step_type: str
     executions: List[ProbeRuleStepExecutionResponse] = []
+
+
+class SnapshotCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    start_time: datetime
+    end_time: datetime
+
+
+class SnapshotUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+class SnapshotDataPoint(BaseModel):
+    target_id: int
+    target_name: str
+    timestamp: datetime
+    status: str
+    latency_ms: Optional[float]
+    success: bool
+    consecutive_failures: int
+    consecutive_successes: int
+    error_message: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class SnapshotAlertPoint(BaseModel):
+    target_id: int
+    target_name: str
+    timestamp: datetime
+    from_status: str
+    to_status: str
+
+    class Config:
+        from_attributes = True
+
+
+class SnapshotResponse(BaseModel):
+    id: int
+    name: str
+    description: Optional[str]
+    start_time: datetime
+    end_time: datetime
+    target_count: int
+    data_point_count: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SnapshotDetailResponse(SnapshotResponse):
+    data: List[SnapshotDataPoint] = []
+    alerts: List[SnapshotAlertPoint] = []
+
+
+class SnapshotTimelinePoint(BaseModel):
+    timestamp: datetime
+    targets: Dict[str, Any]
+
+
+class SnapshotComparisonResponse(BaseModel):
+    snapshot_a: SnapshotResponse
+    snapshot_b: SnapshotResponse
+    common_targets: List[str]
+    comparisons: List[Dict[str, Any]]

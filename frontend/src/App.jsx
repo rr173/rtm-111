@@ -7,6 +7,7 @@ import AddTargetModal from './components/AddTargetModal';
 import AddGroupModal from './components/AddGroupModal';
 import TopologyPage from './components/TopologyPage';
 import RuleEditor from './components/RuleEditor';
+import SnapshotList from './components/SnapshotList';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
@@ -200,6 +201,12 @@ function App() {
             🔗 依赖拓扑
           </button>
           <button
+            className={`tab-btn ${activeTab === 'snapshots' ? 'active' : ''}`}
+            onClick={() => setActiveTab('snapshots')}
+          >
+            📸 快照对比
+          </button>
+          <button
             className={`tab-btn`}
             onClick={() => setShowRuleEditor(true)}
           >
@@ -235,12 +242,14 @@ function App() {
                 onTargetGroupChange={handleTargetGroupChange}
               />
             </>
-          ) : (
+          ) : activeTab === 'topology' ? (
             <TopologyPage
               targets={targets}
               dependencies={dependencies}
               setDependencies={setDependencies}
             />
+          ) : (
+            <SnapshotList />
           )}
         </div>
 
