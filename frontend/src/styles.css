@@ -4796,3 +4796,371 @@ body {
     border-radius: 0;
   }
 }
+
+.slo-budget-panel {
+  padding: 0 24px 24px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.slo-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding: 16px 0;
+  border-bottom: 1px solid #334155;
+}
+
+.slo-header-left h2 {
+  font-size: 22px;
+  color: #f1f5f9;
+  margin-bottom: 4px;
+}
+
+.slo-header-subtitle {
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+.slo-summary-cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.slo-summary-card {
+  background: #1e293b;
+  border-radius: 12px;
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border: 1px solid #334155;
+}
+
+.slo-summary-card.safe { border-left: 4px solid #22c55e; }
+.slo-summary-card.fast-burn { border-left: 4px solid #eab308; }
+.slo-summary-card.critical { border-left: 4px solid #ef4444; }
+.slo-summary-card.total { border-left: 4px solid #3b82f6; }
+
+.slo-summary-icon { font-size: 28px; }
+.slo-summary-value { font-size: 28px; font-weight: 700; color: #f1f5f9; }
+.slo-summary-label { font-size: 13px; color: #94a3b8; margin-top: 2px; }
+
+.slo-content {
+  display: flex;
+  gap: 24px;
+}
+
+.slo-list-section {
+  flex: 1;
+  min-width: 0;
+}
+
+.slo-list-section h3 {
+  font-size: 16px;
+  color: #e2e8f0;
+  margin-bottom: 16px;
+}
+
+.slo-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.slo-overview-card {
+  background: #1e293b;
+  border-radius: 12px;
+  padding: 16px;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: 2px solid transparent;
+  position: relative;
+}
+
+.slo-overview-card:hover { border-color: #475569; transform: translateY(-2px); }
+.slo-overview-card.selected { border-color: #3b82f6; background: #1e3a5f; }
+
+.slo-overview-card.safe { border-left: 4px solid #22c55e; }
+.slo-overview-card.fast_burn { border-left: 4px solid #eab308; }
+.slo-overview-card.critical { border-left: 4px solid #ef4444; }
+.slo-overview-card.breached { border-left: 4px solid #dc2626; }
+
+.slo-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.slo-card-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #f1f5f9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+}
+
+.slo-status-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.slo-status-badge.safe { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
+.slo-status-badge.fast-burn { background: rgba(234, 179, 8, 0.15); color: #eab308; }
+.slo-status-badge.critical { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+.slo-status-badge.breached { background: rgba(220, 38, 38, 0.2); color: #dc2626; }
+
+.slo-card-ring {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 12px;
+}
+
+.budget-ring-svg { display: block; }
+
+.slo-card-meta { display: flex; flex-direction: column; gap: 4px; }
+.slo-meta-row { display: flex; justify-content: space-between; align-items: center; }
+.slo-meta-label { font-size: 12px; color: #94a3b8; }
+.slo-meta-value { font-size: 12px; color: #e2e8f0; font-weight: 500; }
+.slo-meta-value.burn-high { color: #f59e0b; }
+.slo-meta-target { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.slo-delete-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: none;
+  border: none;
+  color: #64748b;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px;
+  line-height: 1;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.slo-overview-card:hover .slo-delete-btn { opacity: 1; }
+.slo-delete-btn:hover { color: #ef4444; background: rgba(239, 68, 68, 0.1); }
+
+.slo-detail-section {
+  width: 420px;
+  min-width: 420px;
+  background: #1e293b;
+  border-radius: 12px;
+  padding: 20px;
+  border: 1px solid #334155;
+  max-height: calc(100vh - 240px);
+  overflow-y: auto;
+}
+
+.slo-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.slo-detail-header h3 {
+  font-size: 16px;
+  color: #f1f5f9;
+}
+
+.slo-detail-stats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.slo-detail-stat-card {
+  background: #0f172a;
+  border-radius: 8px;
+  padding: 12px;
+  text-align: center;
+}
+
+.slo-detail-stat-label { font-size: 12px; color: #94a3b8; margin-bottom: 4px; }
+.slo-detail-stat-value { font-size: 18px; font-weight: 700; color: #f1f5f9; }
+.slo-detail-stat-value.burn { color: #ef4444; }
+.slo-detail-stat-value.good { color: #22c55e; }
+.slo-detail-stat-value.warn { color: #eab308; }
+.slo-detail-stat-value.critical { color: #ef4444; }
+
+.slo-detail-section-block {
+  margin-bottom: 20px;
+}
+
+.slo-detail-section-block h4 {
+  font-size: 14px;
+  color: #e2e8f0;
+  margin-bottom: 10px;
+}
+
+.chart-container {
+  background: #0f172a;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.burndown-chart { display: block; }
+
+.slo-attribution-hint {
+  font-size: 12px;
+  color: #64748b;
+  margin-bottom: 10px;
+}
+
+.attribution-bar-container {}
+
+.attribution-bar {
+  height: 28px;
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  background: #0f172a;
+  margin-bottom: 12px;
+}
+
+.attribution-segment {
+  height: 100%;
+  transition: width 0.3s;
+}
+
+.attribution-legend {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+
+.attribution-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.legend-label { color: #94a3b8; }
+.legend-value { color: #f1f5f9; font-weight: 600; }
+.legend-pct { color: #64748b; }
+
+.slo-prediction-cards {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+.slo-pred-card {
+  background: #0f172a;
+  border-radius: 8px;
+  padding: 12px;
+  text-align: center;
+}
+
+.slo-pred-card.warn { border: 1px solid rgba(234, 179, 8, 0.3); }
+.slo-pred-card.critical { border: 1px solid rgba(239, 68, 68, 0.3); }
+.slo-pred-card.good { border: 1px solid rgba(34, 197, 94, 0.3); }
+
+.slo-pred-label { font-size: 11px; color: #94a3b8; margin-bottom: 6px; }
+.slo-pred-value { font-size: 16px; font-weight: 700; color: #f1f5f9; }
+.slo-pred-value.critical { color: #ef4444; }
+.slo-pred-value.good { color: #22c55e; }
+.slo-pred-sub { font-size: 11px; color: #64748b; margin-top: 4px; }
+
+.slo-modal {
+  max-width: 560px;
+  width: 90%;
+}
+
+.slo-modal h2 {
+  font-size: 18px;
+  color: #f1f5f9;
+  margin-bottom: 20px;
+}
+
+.slo-modal .form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.slo-modal .form-group {
+  margin-bottom: 14px;
+}
+
+.slo-modal label {
+  display: block;
+  font-size: 13px;
+  color: #94a3b8;
+  margin-bottom: 4px;
+}
+
+.slo-modal input,
+.slo-modal select {
+  width: 100%;
+  padding: 8px 12px;
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  color: #e2e8f0;
+  font-size: 14px;
+}
+
+.slo-modal input:focus,
+.slo-modal select:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
+
+.slo-modal .modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.loading-state {
+  text-align: center;
+  padding: 40px;
+  color: #94a3b8;
+  font-size: 14px;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 40px;
+  color: #94a3b8;
+}
+
+.empty-icon { font-size: 48px; margin-bottom: 12px; }
+.empty-state p { font-size: 14px; margin-bottom: 4px; }
+.empty-hint { font-size: 12px; color: #64748b; }
+
+@media (max-width: 1024px) {
+  .slo-content { flex-direction: column; }
+  .slo-detail-section { width: 100%; min-width: unset; }
+  .slo-summary-cards { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 640px) {
+  .slo-summary-cards { grid-template-columns: 1fr; }
+  .slo-overview-grid { grid-template-columns: 1fr; }
+  .slo-prediction-cards { grid-template-columns: 1fr; }
+}

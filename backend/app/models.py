@@ -344,3 +344,40 @@ class ChangeEvent(Base):
     data = Column(JSON, nullable=True)
 
     change = relationship("Change", back_populates="events")
+
+
+class SLOTarget(Base):
+    __tablename__ = "slo_targets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(String(1024), nullable=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=True)
+    group_id = Column(Integer, ForeignKey("probe_groups.id"), nullable=True)
+    slo_type = Column(String(30), nullable=False, default="availability")
+    slo_target = Column(Float, nullable=False, default=99.9)
+    latency_threshold_ms = Column(Float, nullable=True)
+    window_days = Column(Integer, nullable=False, default=30)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    target = relationship("ProbeTarget", backref="slo_bindings")
+    group = relationship("ProbeGroup", backref="slo_bindings")
+
+
+class SLOBudgetSnapshot(Base):
+    __tablename__ = "slo_budget_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    slo_id = Column(Integer, ForeignKey("slo_targets.id"), nullable=False, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    total_budget = Column(Float, nullable=False)
+    budget_consumed = Column(Float, nullable=False)
+    budget_remaining = Column(Float, nullable=False)
+    current_value = Column(Float, nullable=False)
+    service_fault = Column(Float, default=0)
+    regional_anomaly = Column(Float, default=0)
+    dependency_cascade = Column(Float, default=0)
+    change_induced = Column(Float, default=0)
+
+    slo = relationship("SLOTarget", backref="snapshots")

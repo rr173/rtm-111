@@ -10,6 +10,7 @@ import RuleEditor from './components/RuleEditor';
 import SnapshotList from './components/SnapshotList';
 import ObservationMatrix from './components/ObservationMatrix';
 import ChangeGuardianPanel from './components/ChangeGuardianPanel';
+import SLOBudgetPanel from './components/SLOBudgetPanel';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
@@ -227,6 +228,12 @@ function App() {
             🛡️ 变更守护
           </button>
           <button
+            className={`tab-btn ${activeTab === 'slo' ? 'active' : ''}`}
+            onClick={() => setActiveTab('slo')}
+          >
+            📉 SLO预算
+          </button>
+          <button
             className={`tab-btn`}
             onClick={() => setShowRuleEditor(true)}
           >
@@ -283,17 +290,21 @@ function App() {
               activeChanges={activeChanges}
               targetChangesMap={targetChangesMap}
             />
+          ) : activeTab === 'slo' ? (
+            <SLOBudgetPanel targets={targets} groups={groups} />
           ) : (
             <SnapshotList />
           )}
         </div>
 
-        <div className="right-panel">
-          <AlertPanel
-            alerts={alerts}
-            onAcknowledge={acknowledgeAlert}
-          />
-        </div>
+        {activeTab !== 'slo' && (
+          <div className="right-panel">
+            <AlertPanel
+              alerts={alerts}
+              onAcknowledge={acknowledgeAlert}
+            />
+          </div>
+        )}
       </div>
 
       {activeTab === 'list' && (

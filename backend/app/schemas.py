@@ -581,3 +581,101 @@ class ChangeComparisonResponse(BaseModel):
     overall_summary: Dict[str, Any]
     conclusion: Optional[str] = None
     conclusion_reason: Optional[str] = None
+
+
+class SLOTargetCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    target_id: Optional[int] = None
+    group_id: Optional[int] = None
+    slo_type: str = "availability"
+    slo_target: float = Field(99.9, ge=0, le=100)
+    latency_threshold_ms: Optional[float] = None
+    window_days: int = Field(30, ge=1, le=365)
+
+
+class SLOTargetUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    target_id: Optional[int] = None
+    group_id: Optional[int] = None
+    slo_type: Optional[str] = None
+    slo_target: Optional[float] = Field(None, ge=0, le=100)
+    latency_threshold_ms: Optional[float] = None
+    window_days: Optional[int] = Field(None, ge=1, le=365)
+
+
+class SLOTargetResponse(BaseModel):
+    id: int
+    name: str
+    description: Optional[str] = None
+    target_id: Optional[int] = None
+    target_name: Optional[str] = None
+    group_id: Optional[int] = None
+    group_name: Optional[str] = None
+    slo_type: str
+    slo_target: float
+    latency_threshold_ms: Optional[float] = None
+    window_days: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SLOBudgetAttribution(BaseModel):
+    service_fault: float = 0
+    regional_anomaly: float = 0
+    dependency_cascade: float = 0
+    change_induced: float = 0
+
+
+class SLOBudgetPoint(BaseModel):
+    timestamp: datetime
+    total_budget: float
+    budget_consumed: float
+    budget_remaining: float
+    current_value: float
+    attribution: SLOBudgetAttribution
+
+
+class SLOBudgetResponse(BaseModel):
+    slo_id: int
+    slo_name: str
+    slo_type: str
+    slo_target: float
+    window_days: int
+    current_value: float
+    total_budget: float
+    budget_consumed: float
+    budget_remaining: float
+    budget_remaining_pct: float
+    burn_rate: float
+    status: str
+    attribution: SLOBudgetAttribution
+    timeline: List[SLOBudgetPoint] = []
+
+
+class SLOBudgetOverviewItem(BaseModel):
+    slo_id: int
+    slo_name: str
+    slo_type: str
+    slo_target: float
+    current_value: float
+    budget_remaining_pct: float
+    burn_rate: float
+    status: str
+    target_name: Optional[str] = None
+    group_name: Optional[str] = None
+
+
+class SLOPredictionResponse(BaseModel):
+    slo_id: int
+    slo_name: str
+    current_value: float
+    burn_rate: float
+    hours_to_breach: Optional[float] = None
+    predicted_breach_time: Optional[datetime] = None
+    projected_value_24h: float
+    will_breach_24h: bool

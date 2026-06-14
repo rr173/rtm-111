@@ -13,6 +13,7 @@ from .models import (
     Snapshot, SnapshotData, SnapshotAlert,
     ObservationPoint, TargetObserverBinding, ObserverProbeResult,
     Change, ChangeTarget, ChangeEvent,
+    SLOTarget, SLOBudgetSnapshot,
 )
 from .schemas import (
     ProbeTargetCreate, ProbeTargetUpdate, ProbeTargetResponse,
@@ -32,6 +33,9 @@ from .schemas import (
     ChangeCreate, ChangeUpdate, ChangeResponse,
     ChangeObservationResponse, ChangeComparisonResponse,
     TargetActiveChange,
+    SLOTargetCreate, SLOTargetUpdate, SLOTargetResponse,
+    SLOBudgetResponse, SLOBudgetPoint, SLOBudgetAttribution,
+    SLOBudgetOverviewItem, SLOPredictionResponse,
 )
 from .observer_engine import observer_engine
 from .probe_engine import probe_engine
@@ -442,6 +446,61 @@ def _migrate_database():
                             conn.execute(text(idx_sql))
                     print(f"Created table {table_name}")
 
+            slo_tables = {
+                "slo_targets": """
+                    CREATE TABLE slo_targets (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name VARCHAR(255) NOT NULL,
+                        description VARCHAR(1024),
+                        target_id INTEGER,
+                        group_id INTEGER,
+                        slo_type VARCHAR(30) NOT NULL DEFAULT 'availability',
+                        slo_target REAL NOT NULL DEFAULT 99.9,
+                        latency_threshold_ms REAL,
+                        window_days INTEGER NOT NULL DEFAULT 30,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE SET NULL,
+                        FOREIGN KEY (group_id) REFERENCES probe_groups(id) ON DELETE SET NULL
+                    )
+                """,
+                "slo_budget_snapshots": """
+                    CREATE TABLE slo_budget_snapshots (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        slo_id INTEGER NOT NULL,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        total_budget REAL NOT NULL,
+                        budget_consumed REAL NOT NULL,
+                        budget_remaining REAL NOT NULL,
+                        current_value REAL NOT NULL,
+                        service_fault REAL DEFAULT 0,
+                        regional_anomaly REAL DEFAULT 0,
+                        dependency_cascade REAL DEFAULT 0,
+                        change_induced REAL DEFAULT 0,
+                        FOREIGN KEY (slo_id) REFERENCES slo_targets(id) ON DELETE CASCADE
+                    )
+                """,
+            }
+
+            for table_name, create_sql in slo_tables.items():
+                result = conn.execute(text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"))
+                if not result.fetchone():
+                    conn.execute(text(create_sql))
+                    index_sqls = {
+                        "slo_targets": [
+                            "CREATE INDEX idx_slo_targets_target_id ON slo_targets(target_id)",
+                            "CREATE INDEX idx_slo_targets_group_id ON slo_targets(group_id)",
+                        ],
+                        "slo_budget_snapshots": [
+                            "CREATE INDEX idx_sbs_slo_id ON slo_budget_snapshots(slo_id)",
+                            "CREATE INDEX idx_sbs_timestamp ON slo_budget_snapshots(timestamp)",
+                        ],
+                    }
+                    if table_name in index_sqls:
+                        for idx_sql in index_sqls[table_name]:
+                            conn.execute(text(idx_sql))
+                    print(f"Created table {table_name}")
+
             conn.commit()
         except Exception as e:
             print(f"Migration error: {e}")
@@ -485,6 +544,7 @@ async def startup_event():
     _init_demo_rules()
     _init_demo_observers()
     _init_demo_changes()
+    _init_demo_slo()
     await observer_engine.start()
     await probe_engine.start()
 
@@ -493,6 +553,109 @@ async def startup_event():
 async def shutdown_event():
     await observer_engine.stop()
     await probe_engine.stop()
+
+
+def _init_demo_slo():
+    db = next(get_db())
+    try:
+        slo_count = db.query(SLOTarget).count()
+        if slo_count > 0:
+            return
+
+        now = datetime.utcnow()
+        target_healthy = db.query(ProbeTarget).filter(ProbeTarget.name.like("%健康%")).first()
+        target_degraded = db.query(ProbeTarget).filter(ProbeTarget.name.like("%间歇%")).first()
+        target_down = db.query(ProbeTarget).filter(ProbeTarget.name.like("%不可达%")).first()
+        group_prod = db.query(ProbeGroup).filter(ProbeGroup.name.like("%生产%")).first()
+        group_test = db.query(ProbeGroup).filter(ProbeGroup.name.like("%测试%")).first()
+
+        slo1 = SLOTarget(
+            name="生产核心服务可用性",
+            description="生产环境核心业务线月度可用性SLO",
+            target_id=target_healthy.id if target_healthy else None,
+            group_id=group_prod.id if group_prod else None,
+            slo_type="availability",
+            slo_target=99.95,
+            latency_threshold_ms=200,
+            window_days=30,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(slo1)
+
+        slo2 = SLOTarget(
+            name="间歇故障服务可用性",
+            description="间歇故障服务的SLO - 预算快速燃尽",
+            target_id=target_degraded.id if target_degraded else None,
+            slo_type="availability",
+            slo_target=99.9,
+            latency_threshold_ms=500,
+            window_days=30,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(slo2)
+
+        slo3 = SLOTarget(
+            name="不可达服务可用性",
+            description="完全不可达服务的SLO - 预算即将耗尽",
+            target_id=target_down.id if target_down else None,
+            group_id=group_test.id if group_test else None,
+            slo_type="availability",
+            slo_target=99.5,
+            latency_threshold_ms=1000,
+            window_days=30,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(slo3)
+        db.flush()
+
+        scenarios = {
+            slo1.id: {"total_budget": 0.05, "start_pct": 0.02, "end_pct": 0.12,
+                      "svc": 0.8, "reg": 0.1, "dep": 0.05, "chg": 0.05},
+            slo2.id: {"total_budget": 0.1, "start_pct": 0.15, "end_pct": 0.65,
+                      "svc": 0.3, "reg": 0.4, "dep": 0.2, "chg": 0.1},
+            slo3.id: {"total_budget": 0.5, "start_pct": 0.50, "end_pct": 0.92,
+                      "svc": 0.35, "reg": 0.1, "dep": 0.35, "chg": 0.2},
+        }
+
+        num_snapshots = 24
+        for slo in [slo1, slo2, slo3]:
+            cfg = scenarios[slo.id]
+            tb = cfg["total_budget"]
+            for i in range(num_snapshots):
+                snap_time = now - timedelta(hours=(num_snapshots - i))
+                progress = i / max(num_snapshots - 1, 1)
+                consumed_pct = cfg["start_pct"] + (cfg["end_pct"] - cfg["start_pct"]) * progress
+                budget_consumed = round(tb * consumed_pct, 6)
+                budget_remaining = round(tb - budget_consumed, 6)
+                current_value = round(100.0 - budget_consumed, 4)
+                budget_remaining_pct = round((budget_remaining / tb) * 100, 1) if tb > 0 else 100
+
+                snap = SLOBudgetSnapshot(
+                    slo_id=slo.id,
+                    timestamp=snap_time,
+                    total_budget=round(tb, 4),
+                    budget_consumed=budget_consumed,
+                    budget_remaining=budget_remaining,
+                    current_value=current_value,
+                    service_fault=round(budget_consumed * cfg["svc"], 4),
+                    regional_anomaly=round(budget_consumed * cfg["reg"], 4),
+                    dependency_cascade=round(budget_consumed * cfg["dep"], 4),
+                    change_induced=round(budget_consumed * cfg["chg"], 4),
+                )
+                db.add(snap)
+
+        db.commit()
+        print("Demo SLO data initialized")
+    except Exception as e:
+        print(f"Demo SLO init error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.rollback()
+    finally:
+        db.close()
 
 
 def _init_demo_data():
@@ -3539,5 +3702,471 @@ def get_change_topology(change_id: int, db: Session = Depends(get_db)):
         "dependencies": deps_data,
         "direct_target_count": len(direct_target_ids),
         "downstream_target_count": len(all_affected_ids) - len(direct_target_ids)
+    }
+
+
+def _get_slo_target_ids(slo: SLOTarget, db: Session) -> List[int]:
+    ids = set()
+    if slo.target_id:
+        ids.add(slo.target_id)
+    if slo.group_id:
+        targets = db.query(ProbeTarget).filter(ProbeTarget.group_id == slo.group_id).all()
+        for t in targets:
+            ids.add(t.id)
+    return list(ids)
+
+
+def _calculate_budget_for_slo(slo: SLOTarget, db: Session) -> dict:
+    now = datetime.utcnow()
+    window_start = now - timedelta(days=slo.window_days)
+    total_budget = 100.0 - slo.slo_target
+
+    latest_snap = db.query(SLOBudgetSnapshot).filter(
+        SLOBudgetSnapshot.slo_id == slo.id
+    ).order_by(SLOBudgetSnapshot.timestamp.desc()).first()
+
+    if latest_snap:
+        recent_snaps = db.query(SLOBudgetSnapshot).filter(
+            SLOBudgetSnapshot.slo_id == slo.id,
+            SLOBudgetSnapshot.timestamp >= now - timedelta(hours=6)
+        ).order_by(SLOBudgetSnapshot.timestamp.asc()).all()
+
+        if len(recent_snaps) >= 2:
+            first = recent_snaps[0]
+            last = recent_snaps[-1]
+            hours_diff = (last.timestamp - first.timestamp).total_seconds() / 3600
+            if hours_diff > 0:
+                consumed_diff = last.budget_consumed - first.budget_consumed
+                burn_rate = consumed_diff / hours_diff * 24 / total_budget if total_budget > 0 else 0
+            else:
+                burn_rate = 0
+        else:
+            burn_rate = 0
+
+        budget_remaining_pct = (latest_snap.budget_remaining / total_budget * 100) if total_budget > 0 else 100.0
+
+        if budget_remaining_pct <= 0:
+            status = "breached"
+        elif budget_remaining_pct <= 20:
+            status = "critical"
+        elif budget_remaining_pct <= 50:
+            status = "fast_burn"
+        else:
+            status = "safe"
+
+        attribution = {
+            "service_fault": latest_snap.service_fault,
+            "regional_anomaly": latest_snap.regional_anomaly,
+            "dependency_cascade": latest_snap.dependency_cascade,
+            "change_induced": latest_snap.change_induced,
+        }
+
+        return {
+            "current_value": latest_snap.current_value,
+            "total_budget": round(total_budget, 4),
+            "budget_consumed": latest_snap.budget_consumed,
+            "budget_remaining": latest_snap.budget_remaining,
+            "budget_remaining_pct": round(budget_remaining_pct, 2),
+            "burn_rate": round(burn_rate, 4),
+            "status": status,
+            "attribution": attribution,
+        }
+
+    target_ids = _get_slo_target_ids(slo, db)
+
+    if not target_ids:
+        return {
+            "current_value": 100.0,
+            "total_budget": 100.0 - slo.slo_target,
+            "budget_consumed": 0,
+            "budget_remaining": 100.0 - slo.slo_target,
+            "budget_remaining_pct": 100.0,
+            "burn_rate": 0,
+            "status": "safe",
+            "attribution": {"service_fault": 0, "regional_anomaly": 0, "dependency_cascade": 0, "change_induced": 0},
+        }
+
+    results = db.query(ProbeResult).filter(
+        ProbeResult.target_id.in_(target_ids),
+        ProbeResult.timestamp >= window_start
+    ).order_by(ProbeResult.timestamp.asc()).all()
+
+    observer_results = db.query(ObserverProbeResult).filter(
+        ObserverProbeResult.target_id.in_(target_ids),
+        ObserverProbeResult.timestamp >= window_start
+    ).all()
+
+    total = len(results) + len(observer_results)
+    if total == 0:
+        return {
+            "current_value": 100.0,
+            "total_budget": 100.0 - slo.slo_target,
+            "budget_consumed": 0,
+            "budget_remaining": 100.0 - slo.slo_target,
+            "budget_remaining_pct": 100.0,
+            "burn_rate": 0,
+            "status": "safe",
+            "attribution": {"service_fault": 0, "regional_anomaly": 0, "dependency_cascade": 0, "change_induced": 0},
+        }
+
+    all_results = list(results) + list(observer_results)
+    failed = [r for r in all_results if not r.success]
+    success_count = total - len(failed)
+    current_value = (success_count / total) * 100
+
+    total_budget = 100.0 - slo.slo_target
+    budget_consumed = max(0, total_budget - (current_value - slo.slo_target))
+    if current_value >= 100.0:
+        budget_consumed = 0
+    elif current_value < slo.slo_target:
+        budget_consumed = total_budget
+    else:
+        budget_consumed = total_budget - (current_value - slo.slo_target)
+
+    budget_remaining = total_budget - budget_consumed
+    budget_remaining_pct = (budget_remaining / total_budget * 100) if total_budget > 0 else 100.0
+
+    service_fault = 0
+    regional_anomaly = 0
+    dependency_cascade = 0
+    change_induced = 0
+
+    for r in failed:
+        is_cascade = False
+        is_change = False
+        is_regional = False
+
+        if hasattr(r, 'target_id') and r.target_id:
+            target = db.query(ProbeTarget).filter(ProbeTarget.id == r.target_id).first()
+            if target and target.cascade_affected:
+                is_cascade = True
+            changes_for_target = db.query(ChangeTarget).filter(ChangeTarget.target_id == r.target_id).all()
+            for ct in changes_for_target:
+                ch = db.query(Change).filter(Change.id == ct.change_id).first()
+                if ch and ch.status == "running" and ch.start_time:
+                    if r.timestamp >= ch.start_time:
+                        is_change = True
+                        break
+
+        if isinstance(r, ObserverProbeResult) and r.observer_id:
+            obs = db.query(ObservationPoint).filter(ObservationPoint.id == r.observer_id).first()
+            if obs:
+                region_results_for_target = [or2 for or2 in observer_results
+                                              if or2.observer_id == r.observer_id
+                                              and or2.target_id == r.target_id]
+                region_failed = sum(1 for x in region_results_for_target if not x.success)
+                region_total = len(region_results_for_target)
+                if region_total > 0:
+                    region_fail_rate = region_failed / region_total
+                    overall_fail_rate = len(failed) / total if total > 0 else 0
+                    if region_fail_rate > overall_fail_rate * 1.5:
+                        is_regional = True
+
+        if is_cascade and is_change:
+            dependency_cascade += 0.5
+            change_induced += 0.5
+        elif is_cascade:
+            dependency_cascade += 1
+        elif is_change:
+            change_induced += 1
+        elif is_regional:
+            regional_anomaly += 1
+        else:
+            service_fault += 1
+
+    total_attrib = service_fault + regional_anomaly + dependency_cascade + change_induced
+    if total_attrib > 0 and total_attrib != len(failed):
+        scale = len(failed) / total_attrib
+        service_fault *= scale
+        regional_anomaly *= scale
+        dependency_cascade *= scale
+        change_induced *= scale
+
+    attribution = {
+        "service_fault": round(service_fault, 2),
+        "regional_anomaly": round(regional_anomaly, 2),
+        "dependency_cascade": round(dependency_cascade, 2),
+        "change_induced": round(change_induced, 2),
+    }
+
+    recent_window = now - timedelta(hours=6)
+    recent_results = [r for r in all_results if r.timestamp >= recent_window]
+    if recent_results:
+        recent_failed = sum(1 for r in recent_results if not r.success)
+        recent_rate = recent_failed / len(recent_results)
+        burn_rate = recent_rate * 24
+    else:
+        burn_rate = 0
+
+    if budget_remaining_pct <= 0:
+        status = "breached"
+    elif budget_remaining_pct <= 20:
+        status = "critical"
+    elif budget_remaining_pct <= 50:
+        status = "fast_burn"
+    else:
+        status = "safe"
+
+    return {
+        "current_value": round(current_value, 4),
+        "total_budget": round(total_budget, 4),
+        "budget_consumed": round(budget_consumed, 4),
+        "budget_remaining": round(budget_remaining, 4),
+        "budget_remaining_pct": round(budget_remaining_pct, 2),
+        "burn_rate": round(burn_rate, 4),
+        "status": status,
+        "attribution": attribution,
+    }
+
+
+def _build_budget_timeline(slo: SLOTarget, db: Session) -> List[dict]:
+    now = datetime.utcnow()
+    points = []
+    total_budget = 100.0 - slo.slo_target
+
+    snapshots = db.query(SLOBudgetSnapshot).filter(
+        SLOBudgetSnapshot.slo_id == slo.id
+    ).order_by(SLOBudgetSnapshot.timestamp.asc()).all()
+
+    if snapshots:
+        for snap in snapshots:
+            points.append({
+                "timestamp": snap.timestamp,
+                "total_budget": snap.total_budget,
+                "budget_consumed": snap.budget_consumed,
+                "budget_remaining": snap.budget_remaining,
+                "current_value": snap.current_value,
+                "attribution": {
+                    "service_fault": snap.service_fault,
+                    "regional_anomaly": snap.regional_anomaly,
+                    "dependency_cascade": snap.dependency_cascade,
+                    "change_induced": snap.change_induced,
+                },
+            })
+        return points
+
+    num_points = 30
+    for i in range(num_points, -1, -1):
+        point_time = now - timedelta(days=slo.window_days * i / num_points)
+        window_start = point_time - timedelta(days=slo.window_days)
+        target_ids = _get_slo_target_ids(slo, db)
+        if not target_ids:
+            continue
+
+        results = db.query(ProbeResult).filter(
+            ProbeResult.target_id.in_(target_ids),
+            ProbeResult.timestamp >= window_start,
+            ProbeResult.timestamp < point_time
+        ).all()
+
+        observer_results = db.query(ObserverProbeResult).filter(
+            ObserverProbeResult.target_id.in_(target_ids),
+            ObserverProbeResult.timestamp >= window_start,
+            ObserverProbeResult.timestamp < point_time
+        ).all()
+
+        total = len(results) + len(observer_results)
+        if total == 0:
+            continue
+
+        all_res = list(results) + list(observer_results)
+        success_count = sum(1 for r in all_res if r.success)
+        current_value = (success_count / total) * 100
+        budget_consumed = max(0, total_budget - (current_value - slo.slo_target)) if current_value < 100.0 else 0
+        budget_remaining = max(0, total_budget - budget_consumed)
+
+        points.append({
+            "timestamp": point_time,
+            "total_budget": round(total_budget, 4),
+            "budget_consumed": round(budget_consumed, 4),
+            "budget_remaining": round(budget_remaining, 4),
+            "current_value": round(current_value, 4),
+            "attribution": {"service_fault": 0, "regional_anomaly": 0, "dependency_cascade": 0, "change_induced": 0},
+        })
+
+    return points
+
+
+def _slo_to_response(slo: SLOTarget, db: Session) -> dict:
+    target_name = None
+    group_name = None
+    if slo.target_id:
+        t = db.query(ProbeTarget).filter(ProbeTarget.id == slo.target_id).first()
+        if t:
+            target_name = t.name
+    if slo.group_id:
+        g = db.query(ProbeGroup).filter(ProbeGroup.id == slo.group_id).first()
+        if g:
+            group_name = g.name
+    return {
+        "id": slo.id,
+        "name": slo.name,
+        "description": slo.description,
+        "target_id": slo.target_id,
+        "target_name": target_name,
+        "group_id": slo.group_id,
+        "group_name": group_name,
+        "slo_type": slo.slo_type,
+        "slo_target": slo.slo_target,
+        "latency_threshold_ms": slo.latency_threshold_ms,
+        "window_days": slo.window_days,
+        "created_at": slo.created_at,
+        "updated_at": slo.updated_at,
+    }
+
+
+@app.get("/api/slo", response_model=List[SLOTargetResponse])
+def list_slo_targets(db: Session = Depends(get_db)):
+    slos = db.query(SLOTarget).order_by(SLOTarget.id.asc()).all()
+    return [_slo_to_response(s, db) for s in slos]
+
+
+@app.get("/api/slo/budget/overview", response_model=List[SLOBudgetOverviewItem])
+def get_slo_budget_overview(db: Session = Depends(get_db)):
+    slos = db.query(SLOTarget).order_by(SLOTarget.id.asc()).all()
+    result = []
+    for slo in slos:
+        budget = _calculate_budget_for_slo(slo, db)
+        target_name = None
+        group_name = None
+        if slo.target_id:
+            t = db.query(ProbeTarget).filter(ProbeTarget.id == slo.target_id).first()
+            if t:
+                target_name = t.name
+        if slo.group_id:
+            g = db.query(ProbeGroup).filter(ProbeGroup.id == slo.group_id).first()
+            if g:
+                group_name = g.name
+        result.append({
+            "slo_id": slo.id,
+            "slo_name": slo.name,
+            "slo_type": slo.slo_type,
+            "slo_target": slo.slo_target,
+            "current_value": budget["current_value"],
+            "budget_remaining_pct": budget["budget_remaining_pct"],
+            "burn_rate": budget["burn_rate"],
+            "status": budget["status"],
+            "target_name": target_name,
+            "group_name": group_name,
+        })
+    return result
+
+
+@app.post("/api/slo", response_model=SLOTargetResponse)
+def create_slo_target(slo_create: SLOTargetCreate, db: Session = Depends(get_db)):
+    now = datetime.utcnow()
+    slo = SLOTarget(
+        name=slo_create.name,
+        description=slo_create.description,
+        target_id=slo_create.target_id,
+        group_id=slo_create.group_id,
+        slo_type=slo_create.slo_type,
+        slo_target=slo_create.slo_target,
+        latency_threshold_ms=slo_create.latency_threshold_ms,
+        window_days=slo_create.window_days,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(slo)
+    db.commit()
+    db.refresh(slo)
+    return _slo_to_response(slo, db)
+
+
+@app.get("/api/slo/{slo_id}", response_model=SLOTargetResponse)
+def get_slo_target(slo_id: int, db: Session = Depends(get_db)):
+    slo = db.query(SLOTarget).filter(SLOTarget.id == slo_id).first()
+    if not slo:
+        raise HTTPException(status_code=404, detail="SLO target not found")
+    return _slo_to_response(slo, db)
+
+
+@app.put("/api/slo/{slo_id}", response_model=SLOTargetResponse)
+def update_slo_target(slo_id: int, slo_update: SLOTargetUpdate, db: Session = Depends(get_db)):
+    slo = db.query(SLOTarget).filter(SLOTarget.id == slo_id).first()
+    if not slo:
+        raise HTTPException(status_code=404, detail="SLO target not found")
+    update_data = slo_update.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(slo, key, value)
+    slo.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(slo)
+    return _slo_to_response(slo, db)
+
+
+@app.delete("/api/slo/{slo_id}")
+def delete_slo_target(slo_id: int, db: Session = Depends(get_db)):
+    slo = db.query(SLOTarget).filter(SLOTarget.id == slo_id).first()
+    if not slo:
+        raise HTTPException(status_code=404, detail="SLO target not found")
+    db.query(SLOBudgetSnapshot).filter(SLOBudgetSnapshot.slo_id == slo_id).delete()
+    db.delete(slo)
+    db.commit()
+    return {"message": "SLO target deleted"}
+
+
+@app.get("/api/slo/{slo_id}/budget", response_model=SLOBudgetResponse)
+def get_slo_budget(slo_id: int, db: Session = Depends(get_db)):
+    slo = db.query(SLOTarget).filter(SLOTarget.id == slo_id).first()
+    if not slo:
+        raise HTTPException(status_code=404, detail="SLO target not found")
+    budget = _calculate_budget_for_slo(slo, db)
+    timeline = _build_budget_timeline(slo, db)
+    return {
+        "slo_id": slo.id,
+        "slo_name": slo.name,
+        "slo_type": slo.slo_type,
+        "slo_target": slo.slo_target,
+        "window_days": slo.window_days,
+        "current_value": budget["current_value"],
+        "total_budget": budget["total_budget"],
+        "budget_consumed": budget["budget_consumed"],
+        "budget_remaining": budget["budget_remaining"],
+        "budget_remaining_pct": budget["budget_remaining_pct"],
+        "burn_rate": budget["burn_rate"],
+        "status": budget["status"],
+        "attribution": budget["attribution"],
+        "timeline": timeline,
+    }
+
+
+@app.get("/api/slo/{slo_id}/prediction", response_model=SLOPredictionResponse)
+def get_slo_prediction(slo_id: int, db: Session = Depends(get_db)):
+    slo = db.query(SLOTarget).filter(SLOTarget.id == slo_id).first()
+    if not slo:
+        raise HTTPException(status_code=404, detail="SLO target not found")
+    budget = _calculate_budget_for_slo(slo, db)
+    burn_rate = budget["burn_rate"]
+    total_budget = budget["total_budget"]
+    budget_remaining = budget["budget_remaining"]
+    current_value = budget["current_value"]
+
+    hours_to_breach = None
+    predicted_breach_time = None
+    will_breach_24h = False
+
+    if burn_rate > 0 and budget_remaining > 0:
+        hours_to_breach = budget_remaining / (burn_rate * total_budget / (slo.window_days * 24)) if burn_rate * total_budget > 0 else None
+        if hours_to_breach:
+            predicted_breach_time = datetime.utcnow() + timedelta(hours=hours_to_breach)
+            will_breach_24h = hours_to_breach <= 24
+    elif budget_remaining <= 0:
+        hours_to_breach = 0
+        predicted_breach_time = datetime.utcnow()
+        will_breach_24h = True
+
+    projected_24h_drop = burn_rate * (24 / (slo.window_days * 24)) * total_budget if total_budget > 0 else 0
+    projected_value_24h = max(0, current_value - projected_24h_drop)
+
+    return {
+        "slo_id": slo.id,
+        "slo_name": slo.name,
+        "current_value": current_value,
+        "burn_rate": burn_rate,
+        "hours_to_breach": round(hours_to_breach, 2) if hours_to_breach else None,
+        "predicted_breach_time": predicted_breach_time,
+        "projected_value_24h": round(projected_value_24h, 4),
+        "will_breach_24h": will_breach_24h,
     }
 
