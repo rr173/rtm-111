@@ -385,3 +385,77 @@ class SnapshotComparisonResponse(BaseModel):
     snapshot_b: SnapshotResponse
     common_targets: List[str]
     comparisons: List[Dict[str, Any]]
+
+
+class ObservationPointCreate(BaseModel):
+    name: str
+    region: str
+    description: Optional[str] = None
+    status: Optional[str] = "online"
+
+
+class ObservationPointUpdate(BaseModel):
+    name: Optional[str] = None
+    region: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+
+
+class ObservationPointResponse(BaseModel):
+    id: int
+    name: str
+    region: str
+    status: str
+    last_heartbeat: Optional[datetime] = None
+    description: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TargetObserverBindingCreate(BaseModel):
+    target_id: int
+    observer_ids: List[int]
+
+
+class ObserverResultResponse(BaseModel):
+    id: int
+    target_id: int
+    observer_id: int
+    observer_name: Optional[str] = None
+    observer_region: Optional[str] = None
+    round_id: str
+    timestamp: datetime
+    success: bool
+    latency_ms: Optional[float] = None
+    error_message: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ObserverRoundSummary(BaseModel):
+    round_id: str
+    target_id: int
+    timestamp: datetime
+    unified_status: str
+    total_observers: int
+    online_observers: int
+    success_count: int
+    failure_count: int
+    offline_count: int
+    results: List[ObserverResultResponse] = []
+
+
+class ObservationMatrixCell(BaseModel):
+    target_id: int
+    target_name: str
+    observer_id: int
+    observer_name: str
+    observer_region: str
+    observer_status: str
+    latest_status: Optional[str] = None
+    latest_latency: Optional[float] = None
+    latest_timestamp: Optional[datetime] = None

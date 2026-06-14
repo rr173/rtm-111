@@ -11,6 +11,7 @@ from .models import (
     ProbeRule, ProbeRuleVersion, ProbeRuleStep,
     ProbeRuleExecution, ProbeRuleStepExecution,
     Snapshot, SnapshotData, SnapshotAlert,
+    ObservationPoint, TargetObserverBinding, ObserverProbeResult,
 )
 from .schemas import (
     ProbeTargetCreate, ProbeTargetUpdate, ProbeTargetResponse,
@@ -25,7 +26,10 @@ from .schemas import (
     ProbeRuleStepHistoryResponse,
     SnapshotCreate, SnapshotUpdate, SnapshotResponse,
     SnapshotDetailResponse, SnapshotComparisonResponse,
+    ObservationPointCreate, ObservationPointUpdate, ObservationPointResponse,
+    TargetObserverBindingCreate,
 )
+from .observer_engine import observer_engine
 from .probe_engine import probe_engine
 from .websocket_manager import manager, get_target_history
 
@@ -302,6 +306,66 @@ def _migrate_database():
                             conn.execute(text(idx_sql))
                     print(f"Created table {table_name}")
 
+            observer_tables = {
+                "observation_points": """
+                    CREATE TABLE observation_points (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name VARCHAR(255) NOT NULL,
+                        region VARCHAR(100) NOT NULL,
+                        status VARCHAR(20) DEFAULT 'online',
+                        last_heartbeat DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        description VARCHAR(512),
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """,
+                "target_observer_bindings": """
+                    CREATE TABLE target_observer_bindings (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        target_id INTEGER NOT NULL,
+                        observer_id INTEGER NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE CASCADE,
+                        FOREIGN KEY (observer_id) REFERENCES observation_points(id) ON DELETE CASCADE
+                    )
+                """,
+                "observer_probe_results": """
+                    CREATE TABLE observer_probe_results (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        target_id INTEGER NOT NULL,
+                        observer_id INTEGER NOT NULL,
+                        round_id VARCHAR(64) NOT NULL,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        success INTEGER NOT NULL,
+                        latency_ms REAL,
+                        error_message TEXT,
+                        FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE CASCADE,
+                        FOREIGN KEY (observer_id) REFERENCES observation_points(id) ON DELETE CASCADE
+                    )
+                """,
+            }
+
+            for table_name, create_sql in observer_tables.items():
+                result = conn.execute(text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"))
+                if not result.fetchone():
+                    conn.execute(text(create_sql))
+                    index_sqls = {
+                        "target_observer_bindings": [
+                            "CREATE INDEX idx_tob_target_id ON target_observer_bindings(target_id)",
+                            "CREATE INDEX idx_tob_observer_id ON target_observer_bindings(observer_id)",
+                        ],
+                        "observer_probe_results": [
+                            "CREATE INDEX idx_opr_target_id ON observer_probe_results(target_id)",
+                            "CREATE INDEX idx_opr_observer_id ON observer_probe_results(observer_id)",
+                            "CREATE INDEX idx_opr_round_id ON observer_probe_results(round_id)",
+                            "CREATE INDEX idx_opr_timestamp ON observer_probe_results(timestamp)",
+                        ],
+                    }
+                    if table_name in index_sqls:
+                        for idx_sql in index_sqls[table_name]:
+                            conn.execute(text(idx_sql))
+                    print(f"Created table {table_name}")
+
             conn.commit()
         except Exception as e:
             print(f"Migration error: {e}")
@@ -327,13 +391,17 @@ async def startup_event():
     loop = asyncio.get_running_loop()
     probe_engine.set_loop(loop)
     manager.set_loop(loop)
+    observer_engine.set_loop(loop)
     _init_demo_data()
     _init_demo_rules()
+    _init_demo_observers()
+    await observer_engine.start()
     await probe_engine.start()
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    await observer_engine.stop()
     await probe_engine.stop()
 
 
@@ -729,6 +797,151 @@ def _init_demo_rules():
         print("Demo rules initialized")
     except Exception as e:
         print(f"Demo rules init error: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _init_demo_observers():
+    db = next(get_db())
+    try:
+        observer_count = db.query(ObservationPoint).count()
+        if observer_count > 0:
+            return
+
+        now = datetime.utcnow()
+
+        observers_data = [
+            {"name": "北京观测点", "region": "华北", "status": "online", "description": "北京机房主观测点"},
+            {"name": "上海观测点", "region": "华东", "status": "online", "description": "上海张江机房观测点"},
+            {"name": "广州观测点", "region": "华南", "status": "online", "description": "广州南沙机房观测点"},
+            {"name": "成都观测点", "region": "西南", "status": "online", "description": "成都西部数据中心"},
+            {"name": "新加坡观测点", "region": "海外-新加坡", "status": "online", "description": "东南亚海外观测点"},
+            {"name": "美西观测点", "region": "海外-美国", "status": "offline", "description": "硅谷观测点（演示离线状态）"},
+        ]
+
+        observer_ids = []
+        for od in observers_data:
+            heartbeat_time = now if od["status"] == "online" else now - timedelta(hours=2)
+            obs = ObservationPoint(
+                name=od["name"],
+                region=od["region"],
+                status=od["status"],
+                description=od["description"],
+                last_heartbeat=heartbeat_time,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(obs)
+            db.flush()
+            observer_ids.append(obs.id)
+
+        targets = db.query(ProbeTarget).all()
+        for target in targets:
+            for oid in observer_ids:
+                binding = TargetObserverBinding(
+                    target_id=target.id,
+                    observer_id=oid,
+                    created_at=now,
+                )
+                db.add(binding)
+
+        db.flush()
+
+        import uuid
+        offline_observer = db.query(ObservationPoint).filter(ObservationPoint.status == "offline").first()
+        healthy_target = db.query(ProbeTarget).filter(ProbeTarget.name.like("%健康%")).first()
+        degraded_target = db.query(ProbeTarget).filter(ProbeTarget.status == "degraded").first()
+        down_target = db.query(ProbeTarget).filter(ProbeTarget.status == "down").first()
+
+        all_observers = db.query(ObservationPoint).all()
+        online_observers = [o for o in all_observers if o.status == "online"]
+
+        for i in range(5):
+            t = now - timedelta(minutes=i * 3)
+            round_id = f"rnd_demo_h_{i}"
+
+            for obs in online_observers:
+                latency = {
+                    "华北": 30, "华东": 25, "华南": 35, "西南": 50, "海外-新加坡": 120
+                }.get(obs.region, 40) + (i % 3) * 5
+
+                db.add(ObserverProbeResult(
+                    target_id=healthy_target.id if healthy_target else 1,
+                    observer_id=obs.id,
+                    round_id=round_id,
+                    timestamp=t,
+                    success=True,
+                    latency_ms=latency,
+                    error_message=None,
+                ))
+
+        if degraded_target:
+            for i in range(5):
+                t = now - timedelta(minutes=i * 3)
+                round_id = f"rnd_demo_d_{i}"
+
+                for obs in online_observers:
+                    is_fail_region = obs.region in ["华南"]
+                    latency = {
+                        "华北": 30, "华东": 25, "华南": 35, "西南": 50, "海外-新加坡": 120
+                    }.get(obs.region, 40) + (i % 3) * 5
+
+                    db.add(ObserverProbeResult(
+                        target_id=degraded_target.id,
+                        observer_id=obs.id,
+                        round_id=round_id,
+                        timestamp=t,
+                        success=not is_fail_region,
+                        latency_ms=latency if not is_fail_region else latency * 2,
+                        error_message=None if not is_fail_region else f"Region {obs.region} access failed (simulated regional failure)",
+                    ))
+
+            observer_engine.set_target_simulation_state(degraded_target.id, {
+                "global_failure": False,
+                "partial_fail_regions": ["华南"],
+                "observer_offline_ids": [],
+            })
+
+        if down_target:
+            for i in range(5):
+                t = now - timedelta(minutes=i * 3)
+                round_id = f"rnd_demo_down_{i}"
+
+                for obs in online_observers:
+                    latency = {
+                        "华北": 30, "华东": 25, "华南": 35, "西南": 50, "海外-新加坡": 120
+                    }.get(obs.region, 40) * 3
+
+                    db.add(ObserverProbeResult(
+                        target_id=down_target.id,
+                        observer_id=obs.id,
+                        round_id=round_id,
+                        timestamp=t,
+                        success=False,
+                        latency_ms=latency,
+                        error_message="Service unavailable (simulated global failure)",
+                    ))
+
+            observer_engine.set_target_simulation_state(down_target.id, {
+                "global_failure": True,
+                "partial_fail_regions": [],
+                "observer_offline_ids": [],
+            })
+
+        if offline_observer and healthy_target:
+            observer_engine.set_target_simulation_state(healthy_target.id, {
+                "global_failure": False,
+                "partial_fail_regions": [],
+                "observer_offline_ids": [offline_observer.id],
+            })
+
+        db.commit()
+        print("Demo observers initialized")
+    except Exception as e:
+        print(f"Demo observers init error: {e}")
+        import traceback
+        traceback.print_exc()
         db.rollback()
     finally:
         db.close()
@@ -1934,3 +2147,145 @@ def compare_snapshots(snapshot_a_id: int, snapshot_b_id: int, db: Session = Depe
         "common_targets": sorted(list(common_targets)),
         "comparisons": sorted(comparisons, key=lambda x: x["diff"]["availability"])
     }
+
+
+@app.get("/api/observers", response_model=List[ObservationPointResponse])
+def list_observers(db: Session = Depends(get_db)):
+    observers = db.query(ObservationPoint).order_by(ObservationPoint.region, ObservationPoint.name).all()
+    return observers
+
+
+@app.get("/api/observers/{observer_id}", response_model=ObservationPointResponse)
+def get_observer(observer_id: int, db: Session = Depends(get_db)):
+    observer = db.query(ObservationPoint).filter(ObservationPoint.id == observer_id).first()
+    if not observer:
+        raise HTTPException(status_code=404, detail="Observer not found")
+    return observer
+
+
+@app.post("/api/observers", response_model=ObservationPointResponse)
+def create_observer(observer_create: ObservationPointCreate, db: Session = Depends(get_db)):
+    now = datetime.utcnow()
+    observer = ObservationPoint(
+        name=observer_create.name,
+        region=observer_create.region,
+        description=observer_create.description,
+        status=observer_create.status or "online",
+        last_heartbeat=now,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(observer)
+    db.commit()
+    db.refresh(observer)
+    observer_engine._broadcast_observers_update()
+    return observer
+
+
+@app.put("/api/observers/{observer_id}", response_model=ObservationPointResponse)
+def update_observer(observer_id: int, observer_update: ObservationPointUpdate, db: Session = Depends(get_db)):
+    observer = db.query(ObservationPoint).filter(ObservationPoint.id == observer_id).first()
+    if not observer:
+        raise HTTPException(status_code=404, detail="Observer not found")
+
+    update_data = observer_update.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(observer, key, value)
+    observer.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(observer)
+    observer_engine._broadcast_observers_update()
+    return observer
+
+
+@app.delete("/api/observers/{observer_id}")
+def delete_observer(observer_id: int, db: Session = Depends(get_db)):
+    observer = db.query(ObservationPoint).filter(ObservationPoint.id == observer_id).first()
+    if not observer:
+        raise HTTPException(status_code=404, detail="Observer not found")
+    db.delete(observer)
+    db.commit()
+    observer_engine._broadcast_observers_update()
+    return {"message": "Observer deleted"}
+
+
+@app.post("/api/observers/{observer_id}/heartbeat")
+def observer_heartbeat(observer_id: int):
+    success = observer_engine.heartbeat(observer_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Observer not found")
+    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/api/observers/{observer_id}/targets")
+def get_observer_targets(observer_id: int, db: Session = Depends(get_db)):
+    bindings = db.query(TargetObserverBinding).filter(
+        TargetObserverBinding.observer_id == observer_id
+    ).all()
+    target_ids = [b.target_id for b in bindings]
+    if not target_ids:
+        return []
+    targets = db.query(ProbeTarget).filter(ProbeTarget.id.in_(target_ids)).all()
+    return [_enrich_target(t, db) for t in targets]
+
+
+@app.get("/api/targets/{target_id}/observers")
+def get_target_observers(target_id: int, db: Session = Depends(get_db)):
+    target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    bindings = db.query(TargetObserverBinding).filter(
+        TargetObserverBinding.target_id == target_id
+    ).all()
+    observer_ids = [b.observer_id for b in bindings]
+
+    if not observer_ids:
+        observers = db.query(ObservationPoint).all()
+    else:
+        observers = db.query(ObservationPoint).filter(ObservationPoint.id.in_(observer_ids)).all()
+
+    return observers
+
+
+@app.post("/api/targets/{target_id}/observers")
+def bind_target_observers(target_id: int, binding: TargetObserverBindingCreate, db: Session = Depends(get_db)):
+    target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    db.query(TargetObserverBinding).filter(TargetObserverBinding.target_id == target_id).delete()
+
+    now = datetime.utcnow()
+    for observer_id in binding.observer_ids:
+        observer = db.query(ObservationPoint).filter(ObservationPoint.id == observer_id).first()
+        if observer:
+            db.add(TargetObserverBinding(
+                target_id=target_id,
+                observer_id=observer_id,
+                created_at=now,
+            ))
+
+    db.commit()
+    return {"message": "Observers bound successfully", "observer_ids": binding.observer_ids}
+
+
+@app.get("/api/observation-matrix")
+def get_observation_matrix(region: str = None):
+    return observer_engine.get_matrix_data(region_filter=region)
+
+
+@app.get("/api/targets/{target_id}/round-history")
+def get_target_round_history(target_id: int, limit: int = 20, db: Session = Depends(get_db)):
+    target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+    return observer_engine.get_target_round_history(target_id, limit=limit)
+
+
+@app.get("/api/observers/regions")
+def list_observer_regions(db: Session = Depends(get_db)):
+    observers = db.query(ObservationPoint).all()
+    regions = list({o.region for o in observers})
+    regions.sort()
+    return {"regions": regions}

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from .database import SessionLocal
 from .models import ProbeTarget, ProbeResult, Alert, Dependency
 from .rule_engine import rule_engine
+from .observer_engine import observer_engine
 from collections import deque
 
 
@@ -148,31 +149,8 @@ class ProbeEngine:
         if target.rule_id:
             return await self._execute_rule_probe(target)
 
-        start_time = time.time()
-        success = False
-        error_message = None
-        latency_ms = None
-
-        try:
-            if target.type == "http":
-                success, error_message, latency_ms = await self._probe_http(target)
-            elif target.type == "tcp":
-                success, error_message, latency_ms = await self._probe_tcp(target)
-            else:
-                error_message = f"Unknown probe type: {target.type}"
-        except Exception as e:
-            error_message = str(e)
-            latency_ms = (time.time() - start_time) * 1000
-
-        if latency_ms is None:
-            latency_ms = (time.time() - start_time) * 1000
-
-        return {
-            "success": success,
-            "latency_ms": latency_ms,
-            "error_message": error_message,
-            "timestamp": datetime.utcnow()
-        }
+        coordinated_result = await observer_engine.execute_coordinated_probe(target)
+        return coordinated_result
 
     async def _execute_rule_probe(self, target: ProbeTarget) -> dict:
         result = await rule_engine.execute_rule(target)
@@ -293,7 +271,7 @@ class ProbeEngine:
         return result
 
     def _update_cascade_status(self, db: Session, upstream_target: ProbeTarget):
-        if upstream_target.status == "down" or upstream_target.status == "degraded":
+        if upstream_target.status in ("down", "degraded", "partial"):
             downstream_targets = self._get_downstream_targets(db, upstream_target.id)
             for target in downstream_targets:
                 if not target.cascade_affected:
@@ -310,7 +288,7 @@ class ProbeEngine:
             for target in downstream_targets:
                 upstreams = self._get_upstream_targets(db, target.id)
                 has_failed_upstream = any(
-                    u.status in ("down", "degraded") for u in upstreams
+                    u.status in ("down", "degraded", "partial") for u in upstreams
                 )
                 if not has_failed_upstream and target.cascade_affected:
                     target.cascade_affected = False
@@ -332,7 +310,11 @@ class ProbeEngine:
             target.consecutive_successes = 0
             target.consecutive_failures += 1
 
-        new_status = self._calculate_status(target, old_status)
+        unified_status = result.get("unified_status")
+        if unified_status and unified_status in ("healthy", "partial", "degraded", "down"):
+            new_status = unified_status
+        else:
+            new_status = self._calculate_status(target, old_status)
 
         if new_status != old_status:
             target.status = new_status
@@ -588,6 +570,13 @@ class ProbeEngine:
                 "has_rule": target.rule_id is not None,
                 "step_results": result.get("step_results", []),
                 "rule_execution_id": result.get("rule_execution_id"),
+                "round_id": result.get("round_id"),
+                "observer_results": result.get("observer_results", []),
+                "unified_status": result.get("unified_status"),
+                "success_count": result.get("success_count"),
+                "failure_count": result.get("failure_count"),
+                "offline_count": result.get("offline_count"),
+                "online_count": result.get("online_count"),
             }
         }
         for callback in self.result_callbacks:

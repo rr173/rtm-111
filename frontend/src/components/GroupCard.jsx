@@ -15,7 +15,8 @@ function GroupCard({
   detailData,
   onRefreshGroups,
   onRefreshTargets,
-  onTargetGroupChange
+  onTargetGroupChange,
+  targetRoundResultsMap = {}
 }) {
   const [expanded, setExpanded] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
@@ -221,6 +222,7 @@ function GroupCard({
                 onTogglePause={onTogglePause}
                 onToggleSilence={onToggleSilence}
                 detailData={detailData}
+                roundResults={targetRoundResultsMap[target.id] || []}
               />
             ))
           ) : (

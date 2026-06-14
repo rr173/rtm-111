@@ -8,6 +8,7 @@ import AddGroupModal from './components/AddGroupModal';
 import TopologyPage from './components/TopologyPage';
 import RuleEditor from './components/RuleEditor';
 import SnapshotList from './components/SnapshotList';
+import ObservationMatrix from './components/ObservationMatrix';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
@@ -22,7 +23,10 @@ function App() {
     setGroups,
     setAlerts,
     setDependencies,
-    loadInitialData
+    loadInitialData,
+    observers,
+    observationMatrix,
+    targetRoundResultsMap
   } = useWebSocket();
   const [activeTab, setActiveTab] = useState('list');
   const [expandedTarget, setExpandedTarget] = useState(null);
@@ -180,6 +184,7 @@ function App() {
   };
 
   const healthyCount = targets.filter(t => t.status === 'healthy' && !t.paused).length;
+  const partialCount = targets.filter(t => t.status === 'partial' && !t.paused).length;
   const degradedCount = targets.filter(t => t.status === 'degraded' && !t.paused).length;
   const downCount = targets.filter(t => t.status === 'down' && !t.paused).length;
 
@@ -207,6 +212,12 @@ function App() {
             📸 快照对比
           </button>
           <button
+            className={`tab-btn ${activeTab === 'matrix' ? 'active' : ''}`}
+            onClick={() => setActiveTab('matrix')}
+          >
+            🌐 观测矩阵
+          </button>
+          <button
             className={`tab-btn`}
             onClick={() => setShowRuleEditor(true)}
           >
@@ -225,6 +236,7 @@ function App() {
             <>
               <StatsBar
                 healthy={healthyCount}
+                partial={partialCount}
                 degraded={degradedCount}
                 down={downCount}
               />
@@ -240,8 +252,15 @@ function App() {
                 onRefreshGroups={refreshGroups}
                 onRefreshTargets={refreshTargets}
                 onTargetGroupChange={handleTargetGroupChange}
+                targetRoundResultsMap={targetRoundResultsMap || {}}
               />
             </>
+          ) : activeTab === 'matrix' ? (
+            <ObservationMatrix
+              matrixData={observationMatrix}
+              observers={observers}
+              targets={targets}
+            />
           ) : activeTab === 'topology' ? (
             <TopologyPage
               targets={targets}

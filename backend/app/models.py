@@ -4,6 +4,50 @@ from datetime import datetime
 from .database import Base
 
 
+class ObservationPoint(Base):
+    __tablename__ = "observation_points"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    region = Column(String(100), nullable=False)
+    status = Column(String(20), default="online")
+    last_heartbeat = Column(DateTime, default=datetime.utcnow)
+    description = Column(String(512), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    target_bindings = relationship("TargetObserverBinding", back_populates="observer", cascade="all, delete-orphan")
+    probe_results = relationship("ObserverProbeResult", back_populates="observer", cascade="all, delete-orphan")
+
+
+class TargetObserverBinding(Base):
+    __tablename__ = "target_observer_bindings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False)
+    observer_id = Column(Integer, ForeignKey("observation_points.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    target = relationship("ProbeTarget", back_populates="observer_bindings")
+    observer = relationship("ObservationPoint", back_populates="target_bindings")
+
+
+class ObserverProbeResult(Base):
+    __tablename__ = "observer_probe_results"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False, index=True)
+    observer_id = Column(Integer, ForeignKey("observation_points.id"), nullable=False, index=True)
+    round_id = Column(String(64), nullable=False, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    success = Column(Boolean, nullable=False)
+    latency_ms = Column(Float, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    target = relationship("ProbeTarget", back_populates="observer_results")
+    observer = relationship("ObservationPoint", back_populates="probe_results")
+
+
 class ProbeGroup(Base):
     __tablename__ = "probe_groups"
 
@@ -152,6 +196,8 @@ class ProbeTarget(Base):
         back_populates="downstream_target",
         cascade="all, delete-orphan"
     )
+    observer_bindings = relationship("TargetObserverBinding", back_populates="target", cascade="all, delete-orphan")
+    observer_results = relationship("ObserverProbeResult", back_populates="target", cascade="all, delete-orphan")
 
 
 class Dependency(Base):

@@ -1,24 +1,54 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
+function normalizeRoundResult(raw) {
+  const observerResults = raw.observer_results || raw.results || [];
+  const results = observerResults.map(r => ({
+    observer_id: r.observer_id,
+    observer_name: r.observer_name || r.name || '',
+    observer_region: r.observer_region || r.region || '',
+    observer_status: r.observer_status || (r.success ? 'online' : 'online'),
+    success: r.success,
+    latency_ms: r.latency_ms,
+    error_message: r.error_message || r.error || null
+  }));
+  return {
+    round_id: raw.round_id,
+    timestamp: raw.timestamp,
+    failure_type: raw.failure_type || raw.unified_status || 'all_healthy',
+    unified_status: raw.unified_status,
+    success_count: raw.success_count,
+    failure_count: raw.failure_count,
+    offline_count: raw.offline_count || 0,
+    online_count: raw.online_count,
+    results
+  };
+}
+
 export function useWebSocket() {
   const [connected, setConnected] = useState(false);
   const [targets, setTargets] = useState([]);
   const [groups, setGroups] = useState([]);
   const [alerts, setAlerts] = useState([]);
   const [dependencies, setDependencies] = useState([]);
+  const [observers, setObservers] = useState([]);
+  const [observationMatrix, setObservationMatrix] = useState(null);
+  const [targetRoundResultsMap, setTargetRoundResultsMap] = useState({});
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const resultsRef = useRef({});
+  const roundResultsRef = useRef({});
   const connectedRef = useRef(false);
 
   const loadInitialData = useCallback(async () => {
     try {
       const apiBase = import.meta.env.VITE_API_HTTP_URL || '';
-      const [targetsRes, groupsRes, alertsRes, depsRes] = await Promise.all([
+      const [targetsRes, groupsRes, alertsRes, depsRes, observersRes, matrixRes] = await Promise.all([
         fetch(`${apiBase}/api/targets`),
         fetch(`${apiBase}/api/groups`),
         fetch(`${apiBase}/api/alerts?limit=50`),
-        fetch(`${apiBase}/api/dependencies`)
+        fetch(`${apiBase}/api/dependencies`),
+        fetch(`${apiBase}/api/observers`),
+        fetch(`${apiBase}/api/observation-matrix`)
       ]);
       if (targetsRes.ok && groupsRes.ok && alertsRes.ok && depsRes.ok) {
         const [targetsData, groupsData, alertsData, depsData] = await Promise.all([
@@ -31,6 +61,14 @@ export function useWebSocket() {
         setGroups(groupsData);
         setAlerts(alertsData.reverse());
         setDependencies(depsData);
+      }
+      if (observersRes.ok) {
+        const observersData = await observersRes.json();
+        setObservers(observersData);
+      }
+      if (matrixRes.ok) {
+        const matrixData = await matrixRes.json();
+        setObservationMatrix(matrixData);
       }
     } catch (e) {
       console.error('Failed to load initial data:', e);
@@ -71,6 +109,10 @@ export function useWebSocket() {
           setTargets(data.targets || []);
           setGroups(data.groups || []);
           setDependencies(data.dependencies || []);
+          setObservers(data.observers || []);
+          if (data.observation_matrix) {
+            setObservationMatrix(data.observation_matrix);
+          }
           setAlerts(prevAlerts => {
             const snapshotAlerts = data.alerts || [];
             const merged = new Map();
@@ -106,6 +148,8 @@ export function useWebSocket() {
               }
             }
           }
+        } else if (data.type === 'observers_update') {
+          setObservers(data.observers || []);
         } else if (data.type === 'targets_snapshot') {
           setTargets(data.targets || []);
         } else if (data.type === 'dependencies_update') {
@@ -130,6 +174,20 @@ export function useWebSocket() {
           resultsRef.current[targetId].push(data.result);
           if (resultsRef.current[targetId].length > 200) {
             resultsRef.current[targetId].shift();
+          }
+          if (data.result && data.result.round_id) {
+            if (!roundResultsRef.current[targetId]) {
+              roundResultsRef.current[targetId] = [];
+            }
+            const normalized = normalizeRoundResult(data.result);
+            roundResultsRef.current[targetId].unshift(normalized);
+            if (roundResultsRef.current[targetId].length > 50) {
+              roundResultsRef.current[targetId].pop();
+            }
+            setTargetRoundResultsMap(prev => ({
+              ...prev,
+              [targetId]: [...roundResultsRef.current[targetId]]
+            }));
           }
         }
       };
@@ -193,17 +251,35 @@ export function useWebSocket() {
     setDependencies(newDeps);
   }, []);
 
+  const setObserversData = useCallback((newObservers) => {
+    setObservers(newObservers);
+  }, []);
+
+  const setObservationMatrixData = useCallback((newMatrix) => {
+    setObservationMatrix(newMatrix);
+  }, []);
+
+  const getRoundResults = useCallback((targetId) => {
+    return roundResultsRef.current[targetId] || [];
+  }, []);
+
   return {
     connected,
     targets,
     groups,
     alerts,
     dependencies,
+    observers,
+    observationMatrix,
+    targetRoundResultsMap,
     getResults,
+    getRoundResults,
     setTargets: setTargetsData,
     setGroups: setGroupsData,
     setAlerts: setAlertsData,
     setDependencies: setDependenciesData,
+    setObservers: setObserversData,
+    setObservationMatrix: setObservationMatrixData,
     loadInitialData
   };
 }

@@ -5,22 +5,48 @@ import RuleTopology from './RuleTopology';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
-function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause, onToggleSilence, detailData, groups = [], onGroupChange }) {
+function getFailureTypeLabel(type) {
+  const labels = {
+    all_healthy: { text: '全部正常', color: '#22c55e' },
+    service_failure: { text: '服务故障', color: '#ef4444' },
+    regional_failure: { text: '区域故障', color: '#f59e0b' },
+    partial_failure: { text: '局部异常', color: '#f59e0b' },
+    observer_offline: { text: '观测点离线', color: '#6b7280' },
+    all_observers_offline: { text: '观测点全部离线', color: '#6b7280' },
+  };
+  return labels[type] || { text: type, color: '#9ca3af' };
+}
+
+function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause, onToggleSilence, detailData, groups = [], onGroupChange, roundResults = [] }) {
   const [historyData, setHistoryData] = useState(null);
   const [alertsHistory, setAlertsHistory] = useState([]);
   const [selectedGroupId, setSelectedGroupId] = useState(target.group_id || '');
   const [nextProbeCountdown, setNextProbeCountdown] = useState(null);
   const [ruleData, setRuleData] = useState(null);
+  const [observerRoundHistory, setObserverRoundHistory] = useState([]);
+  const [targetObservers, setTargetObservers] = useState([]);
 
   useEffect(() => {
     if (expanded) {
       fetchHistory();
       fetchAlerts();
+      fetchObserverRoundHistory();
+      fetchTargetObservers();
       if (target.rule_id) {
         fetchRuleDetails();
       }
     }
   }, [expanded, target.id]);
+
+  useEffect(() => {
+    if (roundResults && roundResults.length > 0) {
+      setObserverRoundHistory(prev => {
+        const existingIds = new Set(prev.map(r => r.round_id));
+        const newRounds = roundResults.filter(r => !existingIds.has(r.round_id));
+        return [...newRounds, ...prev].slice(0, 50);
+      });
+    }
+  }, [roundResults]);
 
   useEffect(() => {
     if (!target.next_probe_at) {
@@ -77,6 +103,30 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
     }
   };
 
+  const fetchObserverRoundHistory = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/targets/${target.id}/round-history?limit=30`);
+      if (res.ok) {
+        const data = await res.json();
+        setObserverRoundHistory(data);
+      }
+    } catch (e) {
+      console.error('Failed to fetch observer round history:', e);
+    }
+  };
+
+  const fetchTargetObservers = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/targets/${target.id}/observers`);
+      if (res.ok) {
+        const data = await res.json();
+        setTargetObservers(data);
+      }
+    } catch (e) {
+      console.error('Failed to fetch target observers:', e);
+    }
+  };
+
   const displayStatus = target.cascade_affected ? 'cascade' : (target.paused ? 'paused' : target.status);
 
   const statusLabel = useMemo(() => {
@@ -84,6 +134,7 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
     if (target.paused) return '已暂停';
     switch (target.status) {
       case 'healthy': return '健康';
+      case 'partial': return '局部异常';
       case 'degraded': return '降级';
       case 'down': return '故障';
       default: return target.status;
@@ -285,6 +336,109 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
                 </div>
               )}
             </div>
+          </div>
+
+          <div className="detail-section">
+            <h3>🌐 多观测点协同探测</h3>
+            <div className="observers-summary">
+              <div className="observers-stats">
+                <div className="stat-mini">
+                  <span className="stat-mini-label">配置观测点:</span>
+                  <span className="stat-mini-value">{targetObservers.length}</span>
+                </div>
+                <div className="stat-mini">
+                  <span className="stat-mini-label">在线观测点:</span>
+                  <span className="stat-mini-value" style={{ color: '#22c55e' }}>
+                    {targetObservers.filter(o => o.status === 'online').length}
+                  </span>
+                </div>
+                <div className="stat-mini">
+                  <span className="stat-mini-label">离线观测点:</span>
+                  <span className="stat-mini-value" style={{ color: '#ef4444' }}>
+                    {targetObservers.filter(o => o.status === 'offline').length}
+                  </span>
+                </div>
+              </div>
+              <div className="observers-list">
+                {targetObservers.map(obs => (
+                  <div key={obs.id} className={`observer-tag obs-${obs.status}`}>
+                    <span className="obs-dot"></span>
+                    {obs.name}
+                    <span className="obs-region">({obs.region})</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {observerRoundHistory.length > 0 ? (
+              <div className="round-history">
+                <h4 style={{ fontSize: '13px', marginBottom: '10px', color: '#cbd5e1' }}>
+                  最近探测轮次（各观测点结果分歧）
+                </h4>
+                <div className="round-list">
+                  {observerRoundHistory.slice(0, 10).map((round, idx) => {
+                    const failureInfo = getFailureTypeLabel(round.failure_type);
+                    return (
+                      <div key={round.round_id || idx} className="round-item">
+                        <div className="round-header">
+                          <span className="round-time">{formatTime(round.timestamp)}</span>
+                          <span
+                            className="round-failure-type"
+                            style={{ background: failureInfo.color, color: '#fff' }}
+                          >
+                            {failureInfo.text}
+                          </span>
+                          <span className="round-summary">
+                            <span style={{ color: '#22c55e' }}>✓ {round.success_count}</span>
+                            <span style={{ color: '#94a3b8', margin: '0 4px' }}>/</span>
+                            <span style={{ color: '#ef4444' }}>✗ {round.failure_count}</span>
+                            <span style={{ color: '#94a3b8', margin: '0 4px' }}>/</span>
+                            <span style={{ color: '#6b7280' }}>离线 {round.offline_count || 0}</span>
+                          </span>
+                        </div>
+                        <div className="round-observer-results">
+                          {round.results && round.results.map((r, ridx) => (
+                            <div
+                              key={ridx}
+                              className={`observer-result ${r.success ? 'success' : 'fail'} ${r.observer_status === 'offline' ? 'offline' : ''}`}
+                              title={r.error_message || ''}
+                            >
+                              <div className="observer-result-header">
+                                <span className="obs-result-name">{r.observer_name}</span>
+                                <span className="obs-result-region">{r.observer_region}</span>
+                              </div>
+                              <div className="observer-result-status">
+                                {r.observer_status === 'offline' ? (
+                                  <span style={{ color: '#6b7280' }}>⬤ 离线</span>
+                                ) : r.success ? (
+                                  <span style={{ color: '#22c55e' }}>✓ 成功</span>
+                                ) : (
+                                  <span style={{ color: '#ef4444' }}>✗ 失败</span>
+                                )}
+                              </div>
+                              {r.latency_ms != null && (
+                                <div className="obs-result-latency">
+                                  {r.latency_ms >= 1000
+                                    ? `${(r.latency_ms / 1000).toFixed(1)}s`
+                                    : `${r.latency_ms.toFixed(0)}ms`}
+                                </div>
+                              )}
+                              {r.error_message && (
+                                <div className="obs-result-error">{r.error_message}</div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div style={{ color: '#64748b', textAlign: 'center', padding: '20px' }}>
+                暂无多观测点探测历史
+              </div>
+            )}
           </div>
 
           <div className="detail-section">

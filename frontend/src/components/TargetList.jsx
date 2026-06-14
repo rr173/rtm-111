@@ -13,7 +13,8 @@ function TargetList({
   detailData,
   onRefreshGroups,
   onRefreshTargets,
-  onTargetGroupChange
+  onTargetGroupChange,
+  targetRoundResultsMap = {}
 }) {
   const groupedTargets = useMemo(() => {
     const result = {};
@@ -92,6 +93,7 @@ function TargetList({
           onRefreshGroups={onRefreshGroups}
           onRefreshTargets={onRefreshTargets}
           onTargetGroupChange={onTargetGroupChange}
+          targetRoundResultsMap={targetRoundResultsMap}
         />
       ))}
 
@@ -124,6 +126,7 @@ function TargetList({
                 onTogglePause={onTogglePause}
                 onToggleSilence={onToggleSilence}
                 detailData={detailData}
+                roundResults={targetRoundResultsMap[target.id] || []}
               />
             ))}
           </div>

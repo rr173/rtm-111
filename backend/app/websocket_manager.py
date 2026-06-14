@@ -6,8 +6,9 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal
-from .models import ProbeTarget, Alert, ProbeResult, ProbeGroup, Dependency
+from .models import ProbeTarget, Alert, ProbeResult, ProbeGroup, Dependency, ObservationPoint
 from .probe_engine import probe_engine
+from .observer_engine import observer_engine
 
 
 class ConnectionManager:
@@ -20,6 +21,7 @@ class ConnectionManager:
         probe_engine.register_status_callback(self._on_status_update)
         probe_engine.register_alert_callback(self._on_alert)
         probe_engine.register_result_callback(self._on_probe_result)
+        observer_engine.register_status_callback(self._on_observers_update)
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
@@ -63,6 +65,8 @@ class ConnectionManager:
                 joinedload(Dependency.upstream_target),
                 joinedload(Dependency.downstream_target)
             ).all()
+            observers = db.query(ObservationPoint).all()
+            matrix_data = observer_engine.get_matrix_data()
 
             targets_data = []
             for t in targets:
@@ -171,12 +175,26 @@ class ConnectionManager:
                     "created_at": d.created_at.isoformat() if d.created_at else None
                 })
 
+            observers_data = [
+                {
+                    "id": o.id,
+                    "name": o.name,
+                    "region": o.region,
+                    "status": o.status,
+                    "last_heartbeat": o.last_heartbeat.isoformat() if o.last_heartbeat else None,
+                    "description": o.description,
+                }
+                for o in observers
+            ]
+
             snapshot = {
                 "type": "snapshot",
                 "targets": targets_data,
                 "groups": groups_data,
                 "alerts": alerts_data,
-                "dependencies": deps_data
+                "dependencies": deps_data,
+                "observers": observers_data,
+                "observation_matrix": matrix_data,
             }
             await websocket.send_json(snapshot)
         finally:
@@ -189,6 +207,9 @@ class ConnectionManager:
         self._safe_broadcast(data)
 
     def _on_probe_result(self, data: dict):
+        self._safe_broadcast(data)
+
+    def _on_observers_update(self, data: dict):
         self._safe_broadcast(data)
 
     def _safe_broadcast(self, message: dict):
