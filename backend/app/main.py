@@ -646,7 +646,6 @@ async def startup_event():
     observer_engine.set_loop(loop)
 
     if os.getenv("RESET_DEMO_DATA", "false").lower() == "true":
-        import shutil
         db_path = "./data/probes.db"
         if os.path.exists(db_path):
             try:
@@ -654,7 +653,9 @@ async def startup_event():
                 print("Demo database reset - removed old probes.db")
             except Exception as e:
                 print(f"Failed to remove old database: {e}")
-        _init_db_tables()
+
+    _create_tables()
+    _migrate_database()
 
     _init_demo_data()
     _init_demo_rules()

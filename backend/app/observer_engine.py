@@ -671,5 +671,108 @@ class ObserverEngine:
             return "regional_failure"
         return "partial_failure"
 
+    def get_target_region_divergence(self, target_id: int) -> Optional[dict]:
+        from datetime import timedelta
+        from .models import ProbeTarget
+
+        db = SessionLocal()
+        try:
+            target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+            if not target:
+                return None
+
+            now = datetime.utcnow()
+            cutoff = now - timedelta(minutes=10)
+
+            latest_results = db.query(ObserverProbeResult).filter(
+                ObserverProbeResult.target_id == target_id,
+                ObserverProbeResult.timestamp >= cutoff,
+            ).all()
+
+            if not latest_results:
+                return None
+
+            observer_ids = {r.observer_id for r in latest_results}
+            observers = db.query(ObservationPoint).filter(
+                ObservationPoint.id.in_(list(observer_ids))
+            ).all()
+            observer_map = {o.id: o for o in observers}
+
+            per_observer_latest = {}
+            for r in latest_results:
+                obs_id = r.observer_id
+                if obs_id not in per_observer_latest or r.timestamp > per_observer_latest[obs_id].timestamp:
+                    per_observer_latest[obs_id] = r
+
+            regions = []
+            statuses = set()
+            failed_regions = set()
+            healthy_regions = set()
+
+            for obs_id, r in per_observer_latest.items():
+                obs = observer_map.get(obs_id)
+                if not obs:
+                    continue
+
+                if obs.status != "online":
+                    observer_status = "offline"
+                elif r.success:
+                    observer_status = "healthy"
+                elif target.status == "down":
+                    observer_status = "down"
+                else:
+                    observer_status = "degraded"
+
+                regions.append({
+                    "name": obs.name,
+                    "region": obs.region,
+                    "status": observer_status,
+                    "success": r.success if obs.status == "online" else False,
+                    "latency_ms": r.latency_ms if obs.status == "online" else None,
+                    "error_message": r.error_message if (obs.status == "online" and not r.success) else None,
+                })
+                statuses.add(observer_status)
+                if observer_status in ("down", "degraded"):
+                    failed_regions.add(obs.region)
+                elif observer_status == "healthy":
+                    healthy_regions.add(obs.region)
+
+            has_divergence = len(statuses) > 1 or (len(failed_regions) > 0 and len(healthy_regions) > 0)
+            if not has_divergence and target.status == "healthy":
+                return None
+
+            if target.status == "down":
+                severity = "critical"
+            elif has_divergence:
+                severity = "warning"
+            else:
+                severity = "info"
+
+            if len(failed_regions) == 0 and len(healthy_regions) > 0:
+                summary = f"全部 {len(healthy_regions)} 个观测地区一致正常"
+            elif len(failed_regions) == 1 and len(healthy_regions) > 0:
+                summary = f"{next(iter(failed_regions))} 地区异常，其他 {len(healthy_regions)} 个地区正常"
+            elif len(failed_regions) > 1:
+                summary = f"{len(failed_regions)} 个地区异常分歧，{len(healthy_regions)} 个地区正常"
+            else:
+                summary = f"多观测点状态存在分歧"
+
+            return {
+                "target_id": target_id,
+                "target_name": target.name,
+                "target_status": target.status,
+                "has_divergence": has_divergence,
+                "severity": severity,
+                "summary": summary,
+                "regions": regions,
+                "healthy_region_count": len(healthy_regions),
+                "failed_region_count": len(failed_regions),
+            }
+        except Exception as e:
+            print(f"get_target_region_divergence error: {e}")
+            return None
+        finally:
+            db.close()
+
 
 observer_engine = ObserverEngine()

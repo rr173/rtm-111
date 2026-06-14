@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -794,6 +794,22 @@ class IncidentResponse(BaseModel):
         from_attributes = True
 
 
+VALID_INCIDENT_STATUSES = {"active", "recovering", "resolved"}
+VALID_INCIDENT_SEVERITIES = {"warning", "critical", "info"}
+VALID_NOTE_ACTION_TYPES = {"note", "investigation", "mitigation", "observation", "transfer"}
+
+
+def _validate_non_empty_str(v: Optional[str], min_len: int = 1, max_len: int = 100) -> Optional[str]:
+    if v is None:
+        return v
+    stripped = v.strip()
+    if len(stripped) < min_len:
+        raise ValueError(f"must be at least {min_len} non-whitespace character(s)")
+    if len(stripped) > max_len:
+        raise ValueError(f"must be at most {max_len} characters")
+    return stripped
+
+
 class IncidentUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
@@ -804,10 +820,80 @@ class IncidentUpdate(BaseModel):
     needs_review: Optional[bool] = None
     review_notes: Optional[str] = None
 
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v):
+        if v is None:
+            return v
+        stripped = v.strip()
+        if len(stripped) < 2:
+            raise ValueError("title must be at least 2 non-whitespace characters")
+        if len(stripped) > 512:
+            raise ValueError("title must be at most 512 characters")
+        return stripped
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, v):
+        if v is None:
+            return v
+        stripped = v.strip()
+        if len(stripped) > 5000:
+            raise ValueError("description must be at most 5000 characters")
+        return stripped or None
+
+    @field_validator("severity")
+    @classmethod
+    def validate_severity(cls, v):
+        if v is None:
+            return v
+        if v not in VALID_INCIDENT_SEVERITIES:
+            raise ValueError(f"severity must be one of {sorted(VALID_INCIDENT_SEVERITIES)}")
+        return v
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v):
+        if v is None:
+            return v
+        if v not in VALID_INCIDENT_STATUSES:
+            raise ValueError(f"status must be one of {sorted(VALID_INCIDENT_STATUSES)}")
+        return v
+
+    @field_validator("owner")
+    @classmethod
+    def validate_owner(cls, v):
+        return _validate_non_empty_str(v, min_len=1, max_len=100)
+
+    @field_validator("review_notes")
+    @classmethod
+    def validate_review_notes(cls, v):
+        if v is None:
+            return v
+        stripped = v.strip()
+        if len(stripped) > 5000:
+            raise ValueError("review_notes must be at most 5000 characters")
+        return stripped or None
+
 
 class IncidentAcknowledge(BaseModel):
     acknowledged_by: str
     notes: Optional[str] = None
+
+    @field_validator("acknowledged_by")
+    @classmethod
+    def validate_acknowledged_by(cls, v):
+        return _validate_non_empty_str(v, min_len=1, max_len=100)
+
+    @field_validator("notes")
+    @classmethod
+    def validate_notes(cls, v):
+        if v is None:
+            return v
+        stripped = v.strip()
+        if len(stripped) > 2000:
+            raise ValueError("notes must be at most 2000 characters")
+        return stripped or None
 
 
 class IncidentTransfer(BaseModel):
@@ -815,17 +901,74 @@ class IncidentTransfer(BaseModel):
     transferred_by: Optional[str] = None
     notes: Optional[str] = None
 
+    @field_validator("new_owner")
+    @classmethod
+    def validate_new_owner(cls, v):
+        return _validate_non_empty_str(v, min_len=1, max_len=100)
+
+    @field_validator("transferred_by")
+    @classmethod
+    def validate_transferred_by(cls, v):
+        return _validate_non_empty_str(v, min_len=1, max_len=100)
+
+    @field_validator("notes")
+    @classmethod
+    def validate_notes(cls, v):
+        if v is None:
+            return v
+        stripped = v.strip()
+        if len(stripped) > 2000:
+            raise ValueError("notes must be at most 2000 characters")
+        return stripped or None
+
 
 class IncidentResolve(BaseModel):
     resolved_by: str
     mark_for_review: bool = True
     review_notes: Optional[str] = None
 
+    @field_validator("resolved_by")
+    @classmethod
+    def validate_resolved_by(cls, v):
+        return _validate_non_empty_str(v, min_len=1, max_len=100)
+
+    @field_validator("review_notes")
+    @classmethod
+    def validate_review_notes(cls, v):
+        if v is None:
+            return v
+        stripped = v.strip()
+        if len(stripped) > 5000:
+            raise ValueError("review_notes must be at most 5000 characters")
+        return stripped or None
+
 
 class IncidentNoteCreate(BaseModel):
     author: str
     content: str
     action_type: str = "note"
+
+    @field_validator("author")
+    @classmethod
+    def validate_author(cls, v):
+        return _validate_non_empty_str(v, min_len=1, max_len=100)
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, v):
+        stripped = v.strip()
+        if len(stripped) < 1:
+            raise ValueError("content must not be empty")
+        if len(stripped) > 5000:
+            raise ValueError("content must be at most 5000 characters")
+        return stripped
+
+    @field_validator("action_type")
+    @classmethod
+    def validate_action_type(cls, v):
+        if v not in VALID_NOTE_ACTION_TYPES:
+            raise ValueError(f"action_type must be one of {sorted(VALID_NOTE_ACTION_TYPES)}")
+        return v
 
 
 class IncidentListResponse(BaseModel):
