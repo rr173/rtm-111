@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
-from typing import List, Set
+from typing import List, Set, Optional, Dict, Any
 from datetime import datetime, timedelta
 from collections import deque
 
@@ -14,6 +14,7 @@ from .models import (
     ObservationPoint, TargetObserverBinding, ObserverProbeResult,
     Change, ChangeTarget, ChangeEvent,
     SLOTarget, SLOBudgetSnapshot,
+    Incident, IncidentTarget, IncidentAlert, IncidentTimeline, IncidentNote,
 )
 from .schemas import (
     ProbeTargetCreate, ProbeTargetUpdate, ProbeTargetResponse,
@@ -36,6 +37,11 @@ from .schemas import (
     SLOTargetCreate, SLOTargetUpdate, SLOTargetResponse,
     SLOBudgetResponse, SLOBudgetPoint, SLOBudgetAttribution,
     SLOBudgetOverviewItem, SLOPredictionResponse,
+    IncidentResponse, IncidentUpdate, IncidentAcknowledge, IncidentTransfer, IncidentResolve,
+    IncidentNoteCreate, IncidentListResponse,
+    IncidentTargetInfo, IncidentAlertInfo, IncidentTimelineEvent,
+    IncidentNoteInfo, IncidentDependencyInfo, IncidentRegionDivergence,
+    IncidentSLOBudgetRisk,
 )
 from .observer_engine import observer_engine
 from .probe_engine import probe_engine
@@ -501,6 +507,116 @@ def _migrate_database():
                             conn.execute(text(idx_sql))
                     print(f"Created table {table_name}")
 
+            incident_tables = {
+                "incidents": """
+                    CREATE TABLE incidents (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        title VARCHAR(512) NOT NULL,
+                        description TEXT,
+                        severity VARCHAR(20) DEFAULT 'warning',
+                        status VARCHAR(30) DEFAULT 'active',
+                        first_anomaly_at DATETIME NOT NULL,
+                        last_anomaly_at DATETIME NOT NULL,
+                        recovered_at DATETIME,
+                        bleed_over_until DATETIME,
+                        mitigated INTEGER DEFAULT 0,
+                        mitigated_at DATETIME,
+                        owner VARCHAR(100),
+                        acknowledged INTEGER DEFAULT 0,
+                        acknowledged_at DATETIME,
+                        acknowledged_by VARCHAR(100),
+                        needs_review INTEGER DEFAULT 0,
+                        review_notes TEXT,
+                        parent_incident_id INTEGER,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (parent_incident_id) REFERENCES incidents(id)
+                    )
+                """,
+                "incident_targets": """
+                    CREATE TABLE incident_targets (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        incident_id INTEGER NOT NULL,
+                        target_id INTEGER NOT NULL,
+                        role VARCHAR(30) DEFAULT 'affected',
+                        first_alert_at DATETIME,
+                        last_alert_at DATETIME,
+                        max_severity VARCHAR(20) DEFAULT 'warning',
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (incident_id) REFERENCES incidents(id) ON DELETE CASCADE,
+                        FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE CASCADE
+                    )
+                """,
+                "incident_alerts": """
+                    CREATE TABLE incident_alerts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        incident_id INTEGER NOT NULL,
+                        alert_id INTEGER NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (incident_id) REFERENCES incidents(id) ON DELETE CASCADE,
+                        FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+                    )
+                """,
+                "incident_timeline": """
+                    CREATE TABLE incident_timeline (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        incident_id INTEGER NOT NULL,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        event_type VARCHAR(50) NOT NULL,
+                        title VARCHAR(512) NOT NULL,
+                        description TEXT,
+                        severity VARCHAR(20),
+                        extra_data TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (incident_id) REFERENCES incidents(id) ON DELETE CASCADE
+                    )
+                """,
+                "incident_notes": """
+                    CREATE TABLE incident_notes (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        incident_id INTEGER NOT NULL,
+                        author VARCHAR(100) NOT NULL,
+                        content TEXT NOT NULL,
+                        action_type VARCHAR(30) DEFAULT 'note',
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (incident_id) REFERENCES incidents(id) ON DELETE CASCADE
+                    )
+                """,
+            }
+
+            for table_name, create_sql in incident_tables.items():
+                result = conn.execute(text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"))
+                if not result.fetchone():
+                    conn.execute(text(create_sql))
+                    index_sqls = {
+                        "incidents": [
+                            "CREATE INDEX idx_incidents_status ON incidents(status)",
+                            "CREATE INDEX idx_incidents_first_anomaly ON incidents(first_anomaly_at)",
+                            "CREATE INDEX idx_incidents_recovered ON incidents(recovered_at)",
+                            "CREATE INDEX idx_incidents_created ON incidents(created_at)",
+                        ],
+                        "incident_targets": [
+                            "CREATE INDEX idx_it_incident_id ON incident_targets(incident_id)",
+                            "CREATE INDEX idx_it_target_id ON incident_targets(target_id)",
+                        ],
+                        "incident_alerts": [
+                            "CREATE INDEX idx_ia_incident_id ON incident_alerts(incident_id)",
+                            "CREATE INDEX idx_ia_alert_id ON incident_alerts(alert_id)",
+                        ],
+                        "incident_timeline": [
+                            "CREATE INDEX idx_itl_incident_id ON incident_timeline(incident_id)",
+                            "CREATE INDEX idx_itl_timestamp ON incident_timeline(timestamp)",
+                        ],
+                        "incident_notes": [
+                            "CREATE INDEX idx_in_incident_id ON incident_notes(incident_id)",
+                            "CREATE INDEX idx_in_created_at ON incident_notes(created_at)",
+                        ],
+                    }
+                    if table_name in index_sqls:
+                        for idx_sql in index_sqls[table_name]:
+                            conn.execute(text(idx_sql))
+                    print(f"Created table {table_name}")
+
             conn.commit()
         except Exception as e:
             print(f"Migration error: {e}")
@@ -545,6 +661,8 @@ async def startup_event():
     _init_demo_observers()
     _init_demo_changes()
     _init_demo_slo()
+    _init_demo_incidents()
+    incident_engine.attach_callbacks()
     await observer_engine.start()
     await probe_engine.start()
 
@@ -651,6 +769,616 @@ def _init_demo_slo():
         print("Demo SLO data initialized")
     except Exception as e:
         print(f"Demo SLO init error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.rollback()
+    finally:
+        db.close()
+
+
+class IncidentEngine:
+    def __init__(self):
+        self._alert_callback = None
+        self._status_callback = None
+        self.bleed_over_minutes = 30
+
+    def attach_callbacks(self):
+        probe_engine.register_alert_callback(self._on_new_alert)
+        probe_engine.register_status_callback(self._on_status_update)
+
+    def _on_new_alert(self, data: dict):
+        db = next(get_db())
+        try:
+            alert_id = data.get("alert", {}).get("id")
+            if not alert_id:
+                return
+            alert = db.query(Alert).filter(Alert.id == alert_id).first()
+            if alert:
+                self._process_alert(db, alert)
+                db.commit()
+                manager.broadcast_incidents_update()
+        except Exception as e:
+            print(f"Incident engine alert processing error: {e}")
+            db.rollback()
+        finally:
+            db.close()
+
+    def _on_status_update(self, data: dict):
+        db = next(get_db())
+        try:
+            target_id = data.get("target", {}).get("id")
+            new_status = data.get("target", {}).get("status")
+            if not target_id or new_status != "healthy":
+                return
+            self._check_target_recovery(db, target_id)
+            db.commit()
+            manager.broadcast_incidents_update()
+        except Exception as e:
+            print(f"Incident engine status update error: {e}")
+            db.rollback()
+        finally:
+            db.close()
+
+    def _find_or_create_incident(self, db: Session, alert: Alert) -> Incident:
+        now = datetime.utcnow()
+        related_target_ids = self._get_related_target_ids(db, alert.target_id)
+
+        active_incidents = db.query(Incident).filter(
+            Incident.status.in_(["active", "recovering"])
+        ).all()
+
+        for incident in active_incidents:
+            incident_target_ids = [it.target_id for it in incident.targets]
+            overlap = set(related_target_ids) & set(incident_target_ids)
+            if overlap:
+                if incident.bleed_over_until and incident.bleed_over_until >= now:
+                    incident.status = "active"
+                    incident.recovered_at = None
+                    self._add_timeline_event(db, incident.id, "status_change",
+                                              "故障复发，重新进入处置状态",
+                                              f"目标 {alert.target.name if alert.target else alert.target_id} 在恢复观察期内再次出现异常",
+                                              "critical")
+                    return incident
+                if incident.status == "active":
+                    return incident
+
+        severity = "critical" if alert.to_status == "down" else "warning"
+        target_name = alert.target.name if alert.target else f"Target-{alert.target_id}"
+
+        incident = Incident(
+            title=f"{target_name} 状态异常: {alert.from_status} → {alert.to_status}",
+            description=f"自动生成的故障事件，由告警触发",
+            severity=severity,
+            status="active",
+            first_anomaly_at=alert.timestamp,
+            last_anomaly_at=alert.timestamp,
+            mitigated=False,
+            acknowledged=False,
+            needs_review=False,
+        )
+        db.add(incident)
+        db.flush()
+
+        self._add_timeline_event(db, incident.id, "alert_triggered",
+                                  "首个异常告警触发",
+                                  f"{target_name}: {alert.from_status} → {alert.to_status}",
+                                  severity)
+        return incident
+
+    def _get_related_target_ids(self, db: Session, target_id: int) -> Set[int]:
+        related = {target_id}
+        downstream = _get_downstream_targets(db, target_id)
+        upstream = _get_upstream_targets(db, target_id)
+        for t in downstream:
+            related.add(t.id)
+        for t in upstream:
+            related.add(t.id)
+        return related
+
+    def _process_alert(self, db: Session, alert: Alert):
+        existing = db.query(IncidentAlert).filter(IncidentAlert.alert_id == alert.id).first()
+        if existing:
+            return
+
+        incident = self._find_or_create_incident(db, alert)
+
+        db.add(IncidentAlert(
+            incident_id=incident.id,
+            alert_id=alert.id,
+        ))
+
+        severity = "critical" if alert.to_status == "down" else "warning"
+
+        it = db.query(IncidentTarget).filter(
+            IncidentTarget.incident_id == incident.id,
+            IncidentTarget.target_id == alert.target_id
+        ).first()
+
+        if it:
+            it.last_alert_at = alert.timestamp
+            if severity == "critical":
+                it.max_severity = "critical"
+        else:
+            db.add(IncidentTarget(
+                incident_id=incident.id,
+                target_id=alert.target_id,
+                role="affected",
+                first_alert_at=alert.timestamp,
+                last_alert_at=alert.timestamp,
+                max_severity=severity,
+            ))
+
+        if alert.timestamp < incident.first_anomaly_at:
+            incident.first_anomaly_at = alert.timestamp
+        if alert.timestamp > incident.last_anomaly_at:
+            incident.last_anomaly_at = alert.timestamp
+
+        existing_severity_order = {"warning": 1, "critical": 2}
+        if existing_severity_order.get(severity, 0) > existing_severity_order.get(incident.severity, 0):
+            incident.severity = severity
+
+        target_name = alert.target.name if alert.target else f"Target-{alert.target_id}"
+        self._add_timeline_event(db, incident.id, "alert",
+                                  f"告警: {target_name}",
+                                  f"{alert.from_status} → {alert.to_status}",
+                                  severity)
+
+    def _check_target_recovery(self, db: Session, target_id: int):
+        now = datetime.utcnow()
+        incident_targets = db.query(IncidentTarget).filter(
+            IncidentTarget.target_id == target_id
+        ).all()
+
+        for it in incident_targets:
+            incident = db.query(Incident).filter(Incident.id == it.incident_id).first()
+            if not incident or incident.status not in ["active", "recovering"]:
+                continue
+
+            all_healthy = True
+            for sit in incident.targets:
+                t = db.query(ProbeTarget).filter(ProbeTarget.id == sit.target_id).first()
+                if t and t.status not in ["healthy", "paused"]:
+                    all_healthy = False
+                    break
+
+            if all_healthy:
+                if incident.status == "active":
+                    incident.status = "recovering"
+                    incident.bleed_over_until = now + timedelta(minutes=self.bleed_over_minutes)
+                    incident.recovered_at = now
+                    target_names = ", ".join([
+                        sit.target.name if sit.target else f"Target-{sit.target_id}"
+                        for sit in incident.targets
+                    ])
+                    self._add_timeline_event(db, incident.id, "status_change",
+                                              "所有目标恢复健康",
+                                              f"受影响目标已全部恢复: {target_names}，进入 {self.bleed_over_minutes} 分钟观察期",
+                                              "info")
+            elif incident.status == "recovering":
+                incident.status = "active"
+                incident.recovered_at = None
+                incident.bleed_over_until = None
+
+    def _add_timeline_event(self, db: Session, incident_id: int, event_type: str,
+                            title: str, description: str = None, severity: str = None,
+                            extra_data: dict = None):
+        db.add(IncidentTimeline(
+            incident_id=incident_id,
+            event_type=event_type,
+            title=title,
+            description=description,
+            severity=severity,
+            extra_data=extra_data,
+        ))
+
+
+incident_engine = IncidentEngine()
+
+
+def _incident_to_response(incident: Incident, db: Session, include_details: bool = False) -> dict:
+    now = datetime.utcnow()
+    target_infos = []
+    for it in incident.targets:
+        target = db.query(ProbeTarget).options(joinedload(ProbeTarget.group)).filter(
+            ProbeTarget.id == it.target_id
+        ).first()
+        target_infos.append({
+            "target_id": it.target_id,
+            "target_name": target.name if target else f"Target-{it.target_id}",
+            "target_status": target.status if target else None,
+            "group_name": target.group.name if target and target.group else None,
+            "role": it.role,
+            "first_alert_at": it.first_alert_at,
+            "last_alert_at": it.last_alert_at,
+            "max_severity": it.max_severity,
+        })
+
+    alert_infos = []
+    for ia in incident.alerts:
+        alert = ia.alert
+        alert_infos.append({
+            "alert_id": alert.id,
+            "target_id": alert.target_id,
+            "target_name": alert.target.name if alert.target else None,
+            "timestamp": alert.timestamp,
+            "from_status": alert.from_status,
+            "to_status": alert.to_status,
+        })
+
+    timeline_events = []
+    if include_details:
+        for te in incident.timeline:
+            timeline_events.append({
+                "id": te.id,
+                "timestamp": te.timestamp,
+                "event_type": te.event_type,
+                "title": te.title,
+                "description": te.description,
+                "severity": te.severity,
+                "extra_data": te.extra_data,
+            })
+
+    notes = []
+    if include_details:
+        for note in incident.notes:
+            notes.append({
+                "id": note.id,
+                "author": note.author,
+                "content": note.content,
+                "action_type": note.action_type,
+                "created_at": note.created_at,
+            })
+
+    duration = None
+    if incident.status in ["recovering", "resolved"] and incident.recovered_at:
+        duration = int((incident.recovered_at - incident.first_anomaly_at).total_seconds())
+    elif incident.status == "active":
+        duration = int((now - incident.first_anomaly_at).total_seconds())
+
+    upstream_deps = []
+    downstream_deps = []
+    if include_details:
+        target_ids = [it.target_id for it in incident.targets]
+        visited_up = set()
+        visited_down = set()
+        for tid in target_ids:
+            ups = _get_upstream_targets(db, tid)
+            for u in ups:
+                if u.id not in visited_up and u.id not in target_ids:
+                    visited_up.add(u.id)
+                    upstream_deps.append({
+                        "target_id": u.id,
+                        "target_name": u.name,
+                        "status": u.status,
+                        "direction": "upstream",
+                        "depth": 1,
+                    })
+            downs = _get_downstream_targets(db, tid)
+            for d in downs:
+                if d.id not in visited_down and d.id not in target_ids:
+                    visited_down.add(d.id)
+                    downstream_deps.append({
+                        "target_id": d.id,
+                        "target_name": d.name,
+                        "status": d.status,
+                        "direction": "downstream",
+                        "depth": 1,
+                    })
+
+    active_changes = []
+    if include_details:
+        target_ids = [it.target_id for it in incident.targets]
+        changes = db.query(Change).filter(
+            Change.status.in_(["pending", "running"])
+        ).options(joinedload(Change.targets)).all()
+        for c in changes:
+            affected = any(ct.target_id in target_ids for ct in c.targets)
+            if affected or (c.start_time and c.start_time >= incident.first_anomaly_at - timedelta(hours=1)):
+                active_changes.append({
+                    "change_id": c.id,
+                    "name": c.name,
+                    "status": c.status,
+                    "start_time": c.start_time,
+                    "planned_time": c.planned_time,
+                    "created_by": c.created_by,
+                })
+
+    region_divergence = []
+    if include_details and hasattr(observer_engine, 'get_target_region_divergence'):
+        try:
+            for it in incident.targets:
+                div = observer_engine.get_target_region_divergence(it.target_id)
+                if div:
+                    region_divergence.append(div)
+        except Exception as e:
+            print(f"Error getting region divergence: {e}")
+
+    slo_risks = []
+    if include_details:
+        target_ids = [it.target_id for it in incident.targets]
+        slos = db.query(SLOTarget).all()
+        for slo in slos:
+            related = False
+            if slo.target_id and slo.target_id in target_ids:
+                related = True
+            if slo.group_id:
+                for tid in target_ids:
+                    t = db.query(ProbeTarget).filter(ProbeTarget.id == tid).first()
+                    if t and t.group_id == slo.group_id:
+                        related = True
+                        break
+            if related:
+                budget = _calculate_budget_for_slo(slo, db)
+                slo_risks.append({
+                    "slo_id": slo.id,
+                    "slo_name": slo.name,
+                    "budget_remaining_pct": budget["budget_remaining_pct"],
+                    "burn_rate": budget["burn_rate"],
+                    "status": budget["status"],
+                    "hours_to_breach": None,
+                })
+
+    return {
+        "id": incident.id,
+        "title": incident.title,
+        "description": incident.description,
+        "severity": incident.severity,
+        "status": incident.status,
+        "first_anomaly_at": incident.first_anomaly_at,
+        "last_anomaly_at": incident.last_anomaly_at,
+        "recovered_at": incident.recovered_at,
+        "bleed_over_until": incident.bleed_over_until,
+        "mitigated": incident.mitigated,
+        "mitigated_at": incident.mitigated_at,
+        "owner": incident.owner,
+        "acknowledged": incident.acknowledged,
+        "acknowledged_at": incident.acknowledged_at,
+        "acknowledged_by": incident.acknowledged_by,
+        "needs_review": incident.needs_review,
+        "review_notes": incident.review_notes,
+        "parent_incident_id": incident.parent_incident_id,
+        "created_at": incident.created_at,
+        "updated_at": incident.updated_at,
+        "targets": target_infos,
+        "alerts": alert_infos,
+        "timeline": timeline_events,
+        "notes": notes,
+        "target_count": len(target_infos),
+        "alert_count": len(alert_infos),
+        "duration_seconds": duration,
+        "upstream_dependencies": upstream_deps,
+        "downstream_dependencies": downstream_deps,
+        "active_changes": active_changes,
+        "region_divergence": region_divergence,
+        "slo_budget_risks": slo_risks,
+    }
+
+
+def _calculate_budget_for_slo(slo: SLOTarget, db: Session) -> dict:
+    now = datetime.utcnow()
+    window_start = now - timedelta(days=slo.window_days)
+
+    related_target_ids = set()
+    if slo.target_id:
+        related_target_ids.add(slo.target_id)
+    if slo.group_id:
+        group_targets = db.query(ProbeTarget).filter(ProbeTarget.group_id == slo.group_id).all()
+        for t in group_targets:
+            related_target_ids.add(t.id)
+
+    total_budget = 1.0 - (slo.slo_target / 100.0)
+
+    if not related_target_ids:
+        return {
+            "total_budget": round(total_budget, 4),
+            "budget_consumed": 0,
+            "budget_remaining": round(total_budget, 4),
+            "budget_remaining_pct": 100.0,
+            "current_value": round(slo.slo_target, 4),
+            "burn_rate": 0,
+            "status": "healthy",
+        }
+
+    results = db.query(ProbeResult).filter(
+        ProbeResult.target_id.in_(list(related_target_ids)),
+        ProbeResult.timestamp >= window_start
+    ).all()
+
+    total_checks = len(results)
+    failed_checks = sum(1 for r in results if not r.success)
+    error_rate = failed_checks / total_checks if total_checks > 0 else 0
+
+    budget_consumed = min(error_rate, total_budget) if total_budget > 0 else 0
+    budget_remaining = max(total_budget - budget_consumed, 0)
+    budget_remaining_pct = (budget_remaining / total_budget * 100) if total_budget > 0 else 100
+    current_value = 100.0 - (error_rate * 100)
+
+    recent_results = db.query(ProbeResult).filter(
+        ProbeResult.target_id.in_(list(related_target_ids)),
+        ProbeResult.timestamp >= now - timedelta(hours=1)
+    ).all()
+    recent_total = len(recent_results)
+    recent_failed = sum(1 for r in recent_results if not r.success)
+    recent_error_rate = recent_failed / recent_total if recent_total > 0 else 0
+
+    hourly_budget = total_budget / (slo.window_days * 24) if total_budget > 0 else 0
+    burn_rate = (recent_error_rate / hourly_budget) if hourly_budget > 0 else 0
+
+    if budget_remaining_pct <= 5 or burn_rate >= 10:
+        status = "critical"
+    elif budget_remaining_pct <= 20 or burn_rate >= 2:
+        status = "warning"
+    else:
+        status = "healthy"
+
+    return {
+        "total_budget": round(total_budget, 4),
+        "budget_consumed": round(budget_consumed, 6),
+        "budget_remaining": round(budget_remaining, 6),
+        "budget_remaining_pct": round(budget_remaining_pct, 1),
+        "current_value": round(current_value, 4),
+        "burn_rate": round(burn_rate, 2),
+        "status": status,
+    }
+
+
+def _init_demo_incidents():
+    db = next(get_db())
+    try:
+        incident_count = db.query(Incident).count()
+        if incident_count > 0:
+            return
+
+        now = datetime.utcnow()
+        degraded_target = db.query(ProbeTarget).filter(ProbeTarget.name.like("%间歇%")).first()
+        down_target = db.query(ProbeTarget).filter(ProbeTarget.name.like("%不可达%")).first()
+        healthy_target = db.query(ProbeTarget).filter(ProbeTarget.name.like("%健康%")).first()
+
+        if not degraded_target or not down_target:
+            return
+
+        incident_active = Incident(
+            title="核心服务降级告警 - 多地区观测分歧",
+            description="间歇故障服务在华南地区观测点持续异常，其他地区正常，疑似区域性网络或节点问题",
+            severity="warning",
+            status="active",
+            first_anomaly_at=now - timedelta(minutes=45),
+            last_anomaly_at=now - timedelta(minutes=2),
+            mitigated=False,
+            acknowledged=True,
+            acknowledged_at=now - timedelta(minutes=40),
+            acknowledged_by="张三",
+            owner="李四",
+            needs_review=False,
+            created_at=now - timedelta(minutes=45),
+            updated_at=now,
+        )
+        db.add(incident_active)
+        db.flush()
+
+        db.add(IncidentTarget(
+            incident_id=incident_active.id,
+            target_id=degraded_target.id,
+            role="source",
+            first_alert_at=now - timedelta(minutes=45),
+            last_alert_at=now - timedelta(minutes=5),
+            max_severity="warning",
+        ))
+        db.flush()
+
+        alerts_degraded = db.query(Alert).filter(Alert.target_id == degraded_target.id).all()
+        for a in alerts_degraded:
+            db.add(IncidentAlert(incident_id=incident_active.id, alert_id=a.id))
+
+        timeline_active = [
+            ("alert_triggered", "首个异常告警触发", "示例服务-间歇故障: healthy → degraded", "warning", now - timedelta(minutes=45)),
+            ("status_change", "告警自动确认并分派", "系统自动确认，分派给值班工程师李四", "info", now - timedelta(minutes=42)),
+            ("acknowledged", "张三手动接管", "值班人员张三确认告警并开始排查", "info", now - timedelta(minutes=40)),
+            ("observation_divergence", "发现多地区观测分歧", "华北/华东/西南正常，华南地区持续异常，美西离线", "warning", now - timedelta(minutes=35)),
+            ("investigation", "排查进展: 关联到变更窗口", "发现异常时间与变更守护中的配置发布窗口重合", "info", now - timedelta(minutes=25)),
+            ("owner_transfer", "转交负责人", "转交李四处理，其为该服务Owner", "info", now - timedelta(minutes=15)),
+            ("mitigation", "临时止血方案实施中", "正在将华南地区流量切转到备用集群", "info", now - timedelta(minutes=5)),
+        ]
+        for et, title, desc, sev, ts in timeline_active:
+            db.add(IncidentTimeline(
+                incident_id=incident_active.id,
+                event_type=et,
+                title=title,
+                description=desc,
+                severity=sev,
+                timestamp=ts,
+            ))
+
+        notes_active = [
+            ("张三", "初步怀疑是CDN回源问题，已联系网络组协助排查", "note", now - timedelta(minutes=38)),
+            ("李四", "该服务昨天晚上有一次配置发布，需要对比快照", "note", now - timedelta(minutes=20)),
+            ("李四", "SLO预算燃尽率目前2.3x，需要在12小时内解决", "note", now - timedelta(minutes=10)),
+        ]
+        for author, content, atype, ts in notes_active:
+            db.add(IncidentNote(
+                incident_id=incident_active.id,
+                author=author,
+                content=content,
+                action_type=atype,
+                created_at=ts,
+            ))
+
+        incident_recovered = Incident(
+            title="测试环境服务不可达 - 已恢复待复盘",
+            description="示例服务-不可达因上游依赖故障导致完全不可达，根因已定位并修复，需要召开复盘会",
+            severity="critical",
+            status="recovering",
+            first_anomaly_at=now - timedelta(hours=2, minutes=30),
+            last_anomaly_at=now - timedelta(hours=1, minutes=15),
+            recovered_at=now - timedelta(hours=1),
+            bleed_over_until=now - timedelta(minutes=30),
+            mitigated=True,
+            mitigated_at=now - timedelta(hours=1, minutes=45),
+            acknowledged=True,
+            acknowledged_at=now - timedelta(hours=2, minutes=20),
+            acknowledged_by="王五",
+            owner="赵六",
+            needs_review=True,
+            review_notes="需要复盘：1.上游依赖故障为什么没有提前预警 2.故障恢复时间是否符合SLA 3.是否需要增加降级开关",
+            created_at=now - timedelta(hours=2, minutes=30),
+            updated_at=now - timedelta(hours=1),
+        )
+        db.add(incident_recovered)
+        db.flush()
+
+        db.add(IncidentTarget(
+            incident_id=incident_recovered.id,
+            target_id=down_target.id,
+            role="source",
+            first_alert_at=now - timedelta(hours=2, minutes=30),
+            last_alert_at=now - timedelta(hours=1, minutes=15),
+            max_severity="critical",
+        ))
+        db.flush()
+
+        alerts_down = db.query(Alert).filter(Alert.target_id == down_target.id).all()
+        for a in alerts_down:
+            db.add(IncidentAlert(incident_id=incident_recovered.id, alert_id=a.id))
+
+        timeline_recovered = [
+            ("alert_triggered", "服务状态降级", "示例服务-不可达: healthy → degraded", "warning", now - timedelta(hours=2, minutes=30)),
+            ("alert_triggered", "服务完全不可达", "示例服务-不可达: degraded → down", "critical", now - timedelta(hours=2, minutes=15)),
+            ("acknowledged", "王五确认告警", "确认是测试环境核心服务不可达", "info", now - timedelta(hours=2, minutes=20)),
+            ("cascade_detected", "发现下游依赖受影响", "依赖拓扑检测到API网关和内部文档服务受到级联影响", "warning", now - timedelta(hours=2, minutes=10)),
+            ("investigation", "根因定位: 上游数据库连接池耗尽", "通过日志排查发现上游数据库连接池在发布后被占满", "info", now - timedelta(hours=1, minutes=55)),
+            ("mitigation", "实施止血: 重启数据库连接池", "通过运维平台重启数据库连接池服务", "info", now - timedelta(hours=1, minutes=45)),
+            ("status_change", "服务开始恢复", "示例服务-不可达: down → degraded", "info", now - timedelta(hours=1, minutes=30)),
+            ("status_change", "所有目标恢复健康", "受影响目标已全部恢复，进入 30 分钟观察期", "info", now - timedelta(hours=1)),
+            ("observation_summary", "地区观测一致性检查", "所有在线观测点均确认服务恢复正常", "info", now - timedelta(hours=1)),
+        ]
+        for et, title, desc, sev, ts in timeline_recovered:
+            db.add(IncidentTimeline(
+                incident_id=incident_recovered.id,
+                event_type=et,
+                title=title,
+                description=desc,
+                severity=sev,
+                timestamp=ts,
+            ))
+
+        notes_recovered = [
+            ("王五", "测试环境数据库最近有版本升级，可能是连接池配置问题", "note", now - timedelta(hours=2, minutes=5)),
+            ("赵六", "连接池最大连接数配置被改小了，发布时没注意到这个变更", "note", now - timedelta(hours=1, minutes=50)),
+            ("赵六", "服务已恢复，观察期中，稍后创建复盘会议", "note", now - timedelta(hours=55)),
+        ]
+        for author, content, atype, ts in notes_recovered:
+            db.add(IncidentNote(
+                incident_id=incident_recovered.id,
+                author=author,
+                content=content,
+                action_type=atype,
+                created_at=ts,
+            ))
+
+        db.commit()
+        print("Demo incidents initialized")
+    except Exception as e:
+        print(f"Demo incidents init error: {e}")
         import traceback
         traceback.print_exc()
         db.rollback()
@@ -4169,4 +4897,269 @@ def get_slo_prediction(slo_id: int, db: Session = Depends(get_db)):
         "projected_value_24h": round(projected_value_24h, 4),
         "will_breach_24h": will_breach_24h,
     }
+
+
+@app.get("/api/incidents", response_model=IncidentListResponse)
+def list_incidents(
+    status: Optional[str] = None,
+    severity: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    query = db.query(Incident).options(
+        joinedload(Incident.targets),
+        joinedload(Incident.alerts),
+        joinedload(Incident.timeline),
+        joinedload(Incident.notes),
+    )
+
+    if status:
+        query = query.filter(Incident.status == status)
+    if severity:
+        query = query.filter(Incident.severity == severity)
+
+    incidents = query.order_by(Incident.created_at.desc()).all()
+
+    active_count = db.query(Incident).filter(Incident.status.in_(["active", "recovering"])).count()
+    review_count = db.query(Incident).filter(Incident.status == "recovering", Incident.needs_review == True).count()
+    resolved_count = db.query(Incident).filter(Incident.status == "resolved").count()
+
+    return {
+        "items": [_incident_to_response(i, db) for i in incidents],
+        "active_count": active_count,
+        "review_count": review_count,
+        "resolved_count": resolved_count,
+    }
+
+
+@app.get("/api/incidents/{incident_id}", response_model=IncidentResponse)
+def get_incident(incident_id: int, db: Session = Depends(get_db)):
+    incident = db.query(Incident).options(
+        joinedload(Incident.targets),
+        joinedload(Incident.alerts),
+        joinedload(Incident.timeline),
+        joinedload(Incident.notes),
+    ).filter(Incident.id == incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    return _incident_to_response(incident, db, include_details=True)
+
+
+@app.patch("/api/incidents/{incident_id}", response_model=IncidentResponse)
+def update_incident(incident_id: int, payload: IncidentUpdate, db: Session = Depends(get_db)):
+    incident = db.query(Incident).options(
+        joinedload(Incident.targets),
+        joinedload(Incident.alerts),
+        joinedload(Incident.timeline),
+        joinedload(Incident.notes),
+    ).filter(Incident.id == incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    data = payload.dict(exclude_unset=True)
+
+    if "status" in data:
+        old_status = incident.status
+        new_status = data["status"]
+        if old_status != new_status:
+            db.add(IncidentTimeline(
+                incident_id=incident.id,
+                event_type="status_change",
+                title=f"状态变更: {old_status} → {new_status}",
+                severity="info",
+            ))
+
+    if "severity" in data:
+        old_sev = incident.severity
+        new_sev = data["severity"]
+        if old_sev != new_sev:
+            db.add(IncidentTimeline(
+                incident_id=incident.id,
+                event_type="severity_change",
+                title=f"严重等级变更: {old_sev} → {new_sev}",
+                severity="warning",
+            ))
+
+    if "owner" in data and data["owner"] != incident.owner:
+        db.add(IncidentTimeline(
+            incident_id=incident.id,
+            event_type="owner_transfer",
+            title=f"负责人变更: {incident.owner or '未指派'} → {data['owner']}",
+            severity="info",
+        ))
+
+    if "mitigated" in data and data["mitigated"] != incident.mitigated:
+        if data["mitigated"]:
+            incident.mitigated_at = datetime.utcnow()
+            db.add(IncidentTimeline(
+                incident_id=incident.id,
+                event_type="mitigation",
+                title="已标记止血",
+                description="当前故障已临时止血，正在等待完全恢复",
+                severity="info",
+            ))
+        else:
+            incident.mitigated_at = None
+            db.add(IncidentTimeline(
+                incident_id=incident.id,
+                event_type="mitigation",
+                title="取消止血标记",
+                severity="warning",
+            ))
+
+    for key, value in data.items():
+        setattr(incident, key, value)
+
+    incident.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(incident)
+
+    manager.broadcast_incidents_update()
+    return _incident_to_response(incident, db, include_details=True)
+
+
+@app.post("/api/incidents/{incident_id}/acknowledge", response_model=IncidentResponse)
+def acknowledge_incident(incident_id: int, payload: IncidentAcknowledge, db: Session = Depends(get_db)):
+    incident = db.query(Incident).options(
+        joinedload(Incident.targets),
+        joinedload(Incident.alerts),
+        joinedload(Incident.timeline),
+        joinedload(Incident.notes),
+    ).filter(Incident.id == incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    now = datetime.utcnow()
+    incident.acknowledged = True
+    incident.acknowledged_at = now
+    incident.acknowledged_by = payload.acknowledged_by
+    if not incident.owner:
+        incident.owner = payload.acknowledged_by
+
+    db.add(IncidentTimeline(
+        incident_id=incident.id,
+        event_type="acknowledged",
+        title=f"{payload.acknowledged_by} 手动接管故障",
+        description=payload.notes if payload.notes else None,
+        severity="info",
+        timestamp=now,
+    ))
+
+    incident.updated_at = now
+    db.commit()
+    db.refresh(incident)
+
+    manager.broadcast_incidents_update()
+    return _incident_to_response(incident, db, include_details=True)
+
+
+@app.post("/api/incidents/{incident_id}/transfer", response_model=IncidentResponse)
+def transfer_incident(incident_id: int, payload: IncidentTransfer, db: Session = Depends(get_db)):
+    incident = db.query(Incident).options(
+        joinedload(Incident.targets),
+        joinedload(Incident.alerts),
+        joinedload(Incident.timeline),
+        joinedload(Incident.notes),
+    ).filter(Incident.id == incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    now = datetime.utcnow()
+    old_owner = incident.owner or "未指派"
+    incident.owner = payload.new_owner
+    incident.updated_at = now
+
+    db.add(IncidentTimeline(
+        incident_id=incident.id,
+        event_type="owner_transfer",
+        title=f"转交负责人: {old_owner} → {payload.new_owner}",
+        description=payload.notes if payload.notes else None,
+        severity="info",
+        timestamp=now,
+    ))
+
+    if payload.notes:
+        db.add(IncidentNote(
+            incident_id=incident.id,
+            author=payload.transferred_by or "system",
+            content=payload.notes,
+            action_type="transfer",
+        ))
+
+    db.commit()
+    db.refresh(incident)
+
+    manager.broadcast_incidents_update()
+    return _incident_to_response(incident, db, include_details=True)
+
+
+@app.post("/api/incidents/{incident_id}/notes", response_model=IncidentResponse)
+def add_incident_note(incident_id: int, payload: IncidentNoteCreate, db: Session = Depends(get_db)):
+    incident = db.query(Incident).options(
+        joinedload(Incident.targets),
+        joinedload(Incident.alerts),
+        joinedload(Incident.timeline),
+        joinedload(Incident.notes),
+    ).filter(Incident.id == incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    note = IncidentNote(
+        incident_id=incident.id,
+        author=payload.author,
+        content=payload.content,
+        action_type=payload.action_type or "note",
+    )
+    db.add(note)
+
+    db.add(IncidentTimeline(
+        incident_id=incident.id,
+        event_type="note_added",
+        title=f"{payload.author} 添加了处置记录",
+        description=payload.content[:200],
+        severity="info",
+    ))
+
+    incident.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(incident)
+
+    manager.broadcast_incidents_update()
+    return _incident_to_response(incident, db, include_details=True)
+
+
+@app.post("/api/incidents/{incident_id}/resolve", response_model=IncidentResponse)
+def resolve_incident(incident_id: int, payload: IncidentResolve, db: Session = Depends(get_db)):
+    incident = db.query(Incident).options(
+        joinedload(Incident.targets),
+        joinedload(Incident.alerts),
+        joinedload(Incident.timeline),
+        joinedload(Incident.notes),
+    ).filter(Incident.id == incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    now = datetime.utcnow()
+    incident.status = "resolved"
+    incident.recovered_at = now
+    incident.bleed_over_until = None
+    if payload.mark_for_review:
+        incident.needs_review = True
+        if payload.review_notes:
+            incident.review_notes = payload.review_notes
+
+    db.add(IncidentTimeline(
+        incident_id=incident.id,
+        event_type="status_change",
+        title="故障已解决",
+        description=f"由 {payload.resolved_by} 确认解决" + (f"：{payload.review_notes}" if payload.review_notes else ""),
+        severity="info",
+        timestamp=now,
+    ))
+
+    incident.updated_at = now
+    db.commit()
+    db.refresh(incident)
+
+    manager.broadcast_incidents_update()
+    return _incident_to_response(incident, db, include_details=True)
 

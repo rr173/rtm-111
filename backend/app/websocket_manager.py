@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal
-from .models import ProbeTarget, Alert, ProbeResult, ProbeGroup, Dependency, ObservationPoint, Change, ChangeTarget
+from .models import ProbeTarget, Alert, ProbeResult, ProbeGroup, Dependency, ObservationPoint, Change, ChangeTarget, Incident, IncidentTarget, IncidentAlert, IncidentTimeline, IncidentNote
 from .probe_engine import probe_engine
 from .observer_engine import observer_engine
 
@@ -360,6 +360,95 @@ class ConnectionManager:
                 "type": "changes_update",
                 "changes": changes_data,
                 "target_changes_map": target_changes_map
+            })
+        finally:
+            db.close()
+
+    def broadcast_incidents_update(self):
+        from sqlalchemy.orm import joinedload
+        db = SessionLocal()
+        try:
+            incidents = db.query(Incident).options(
+                joinedload(Incident.targets),
+                joinedload(Incident.alerts),
+                joinedload(Incident.timeline),
+                joinedload(Incident.notes),
+            ).order_by(Incident.created_at.desc()).all()
+
+            items_data = []
+            for incident in incidents:
+                targets_data = []
+                for it in incident.targets:
+                    target = db.query(ProbeTarget).options(joinedload(ProbeTarget.group)).filter(
+                        ProbeTarget.id == it.target_id
+                    ).first()
+                    targets_data.append({
+                        "target_id": it.target_id,
+                        "target_name": target.name if target else f"Target-{it.target_id}",
+                        "target_status": target.status if target else None,
+                        "group_name": target.group.name if target and target.group else None,
+                        "role": it.role,
+                        "first_alert_at": it.first_alert_at.isoformat() if it.first_alert_at else None,
+                        "last_alert_at": it.last_alert_at.isoformat() if it.last_alert_at else None,
+                        "max_severity": it.max_severity,
+                    })
+
+                alerts_data = []
+                for ia in incident.alerts:
+                    alert = ia.alert
+                    alerts_data.append({
+                        "alert_id": alert.id,
+                        "target_id": alert.target_id,
+                        "target_name": alert.target.name if alert.target else None,
+                        "timestamp": alert.timestamp.isoformat() if alert.timestamp else None,
+                        "from_status": alert.from_status,
+                        "to_status": alert.to_status,
+                    })
+
+                duration = None
+                if incident.status in ["recovering", "resolved"] and incident.recovered_at:
+                    duration = int((incident.recovered_at - incident.first_anomaly_at).total_seconds())
+                elif incident.status == "active":
+                    duration = int((datetime.utcnow() - incident.first_anomaly_at).total_seconds())
+
+                items_data.append({
+                    "id": incident.id,
+                    "title": incident.title,
+                    "description": incident.description,
+                    "severity": incident.severity,
+                    "status": incident.status,
+                    "first_anomaly_at": incident.first_anomaly_at.isoformat() if incident.first_anomaly_at else None,
+                    "last_anomaly_at": incident.last_anomaly_at.isoformat() if incident.last_anomaly_at else None,
+                    "recovered_at": incident.recovered_at.isoformat() if incident.recovered_at else None,
+                    "bleed_over_until": incident.bleed_over_until.isoformat() if incident.bleed_over_until else None,
+                    "mitigated": incident.mitigated,
+                    "mitigated_at": incident.mitigated_at.isoformat() if incident.mitigated_at else None,
+                    "owner": incident.owner,
+                    "acknowledged": incident.acknowledged,
+                    "acknowledged_at": incident.acknowledged_at.isoformat() if incident.acknowledged_at else None,
+                    "acknowledged_by": incident.acknowledged_by,
+                    "needs_review": incident.needs_review,
+                    "review_notes": incident.review_notes,
+                    "parent_incident_id": incident.parent_incident_id,
+                    "created_at": incident.created_at.isoformat() if incident.created_at else None,
+                    "updated_at": incident.updated_at.isoformat() if incident.updated_at else None,
+                    "targets": targets_data,
+                    "alerts": alerts_data,
+                    "target_count": len(targets_data),
+                    "alert_count": len(alerts_data),
+                    "duration_seconds": duration,
+                })
+
+            active_count = sum(1 for i in incidents if i.status in ["active", "recovering"])
+            review_count = sum(1 for i in incidents if i.status == "recovering" and i.needs_review)
+            resolved_count = sum(1 for i in incidents if i.status == "resolved")
+
+            self._safe_broadcast({
+                "type": "incidents_update",
+                "items": items_data,
+                "active_count": active_count,
+                "review_count": review_count,
+                "resolved_count": resolved_count,
             })
         finally:
             db.close()

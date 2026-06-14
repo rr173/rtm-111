@@ -679,3 +679,157 @@ class SLOPredictionResponse(BaseModel):
     predicted_breach_time: Optional[datetime] = None
     projected_value_24h: float
     will_breach_24h: bool
+
+
+class IncidentTargetInfo(BaseModel):
+    target_id: int
+    target_name: str
+    target_status: Optional[str] = None
+    group_name: Optional[str] = None
+    role: str
+    first_alert_at: Optional[datetime] = None
+    last_alert_at: Optional[datetime] = None
+    max_severity: str
+
+    class Config:
+        from_attributes = True
+
+
+class IncidentAlertInfo(BaseModel):
+    alert_id: int
+    target_id: int
+    target_name: Optional[str] = None
+    timestamp: datetime
+    from_status: str
+    to_status: str
+
+    class Config:
+        from_attributes = True
+
+
+class IncidentTimelineEvent(BaseModel):
+    id: int
+    timestamp: datetime
+    event_type: str
+    title: str
+    description: Optional[str] = None
+    severity: Optional[str] = None
+    extra_data: Optional[Dict[str, Any]] = None
+
+    class Config:
+        from_attributes = True
+
+
+class IncidentNoteInfo(BaseModel):
+    id: int
+    author: str
+    content: str
+    action_type: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class IncidentDependencyInfo(BaseModel):
+    target_id: int
+    target_name: str
+    status: str
+    direction: str
+    depth: int
+
+
+class IncidentRegionDivergence(BaseModel):
+    target_id: int
+    target_name: str
+    regions: Dict[str, Dict[str, Any]]
+    has_divergence: bool
+    divergent_regions: List[str]
+
+
+class IncidentSLOBudgetRisk(BaseModel):
+    slo_id: int
+    slo_name: str
+    budget_remaining_pct: float
+    burn_rate: float
+    status: str
+    hours_to_breach: Optional[float] = None
+
+
+class IncidentResponse(BaseModel):
+    id: int
+    title: str
+    description: Optional[str] = None
+    severity: str
+    status: str
+    first_anomaly_at: datetime
+    last_anomaly_at: datetime
+    recovered_at: Optional[datetime] = None
+    bleed_over_until: Optional[datetime] = None
+    mitigated: bool
+    mitigated_at: Optional[datetime] = None
+    owner: Optional[str] = None
+    acknowledged: bool
+    acknowledged_at: Optional[datetime] = None
+    acknowledged_by: Optional[str] = None
+    needs_review: bool
+    review_notes: Optional[str] = None
+    parent_incident_id: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+    targets: List[IncidentTargetInfo] = []
+    alerts: List[IncidentAlertInfo] = []
+    timeline: List[IncidentTimelineEvent] = []
+    notes: List[IncidentNoteInfo] = []
+    target_count: int = 0
+    alert_count: int = 0
+    duration_seconds: Optional[int] = None
+    upstream_dependencies: List[IncidentDependencyInfo] = []
+    downstream_dependencies: List[IncidentDependencyInfo] = []
+    active_changes: List[Dict[str, Any]] = []
+    region_divergence: List[IncidentRegionDivergence] = []
+    slo_budget_risks: List[IncidentSLOBudgetRisk] = []
+
+    class Config:
+        from_attributes = True
+
+
+class IncidentUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    severity: Optional[str] = None
+    status: Optional[str] = None
+    mitigated: Optional[bool] = None
+    owner: Optional[str] = None
+    needs_review: Optional[bool] = None
+    review_notes: Optional[str] = None
+
+
+class IncidentAcknowledge(BaseModel):
+    acknowledged_by: str
+    notes: Optional[str] = None
+
+
+class IncidentTransfer(BaseModel):
+    new_owner: str
+    transferred_by: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class IncidentResolve(BaseModel):
+    resolved_by: str
+    mark_for_review: bool = True
+    review_notes: Optional[str] = None
+
+
+class IncidentNoteCreate(BaseModel):
+    author: str
+    content: str
+    action_type: str = "note"
+
+
+class IncidentListResponse(BaseModel):
+    items: List[IncidentResponse] = []
+    active_count: int = 0
+    review_count: int = 0
+    resolved_count: int = 0

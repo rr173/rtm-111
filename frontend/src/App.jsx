@@ -11,6 +11,7 @@ import SnapshotList from './components/SnapshotList';
 import ObservationMatrix from './components/ObservationMatrix';
 import ChangeGuardianPanel from './components/ChangeGuardianPanel';
 import SLOBudgetPanel from './components/SLOBudgetPanel';
+import CommandRoom from './components/CommandRoom';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
@@ -30,7 +31,10 @@ function App() {
     observationMatrix,
     targetRoundResultsMap,
     activeChanges,
-    targetChangesMap
+    targetChangesMap,
+    incidents,
+    incidentStats,
+    setIncidents,
   } = useWebSocket();
   const [activeTab, setActiveTab] = useState('list');
   const [expandedTarget, setExpandedTarget] = useState(null);
@@ -234,6 +238,12 @@ function App() {
             📉 SLO预算
           </button>
           <button
+            className={`tab-btn ${activeTab === 'command' ? 'active' : ''}`}
+            onClick={() => setActiveTab('command')}
+          >
+            🚨 指挥室
+          </button>
+          <button
             className={`tab-btn`}
             onClick={() => setShowRuleEditor(true)}
           >
@@ -292,12 +302,20 @@ function App() {
             />
           ) : activeTab === 'slo' ? (
             <SLOBudgetPanel targets={targets} groups={groups} />
+          ) : activeTab === 'command' ? (
+            <CommandRoom
+              incidents={incidents}
+              incidentStats={incidentStats}
+              targets={targets}
+              dependencies={dependencies}
+              onIncidentUpdate={loadInitialData}
+            />
           ) : (
             <SnapshotList />
           )}
         </div>
 
-        {activeTab !== 'slo' && (
+        {activeTab !== 'slo' && activeTab !== 'command' && (
           <div className="right-panel">
             <AlertPanel
               alerts={alerts}

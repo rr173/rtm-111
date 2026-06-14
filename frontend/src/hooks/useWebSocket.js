@@ -35,6 +35,8 @@ export function useWebSocket() {
   const [targetRoundResultsMap, setTargetRoundResultsMap] = useState({});
   const [activeChanges, setActiveChanges] = useState([]);
   const [targetChangesMap, setTargetChangesMap] = useState({});
+  const [incidents, setIncidents] = useState([]);
+  const [incidentStats, setIncidentStats] = useState({ active_count: 0, review_count: 0, resolved_count: 0 });
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const resultsRef = useRef({});
@@ -77,6 +79,20 @@ export function useWebSocket() {
         const changesData = await changesRes.json();
         setActiveChanges(changesData.changes || []);
         setTargetChangesMap(changesData.target_changes_map || {});
+      }
+      try {
+        const incidentsRes = await fetch(`${apiBase}/api/incidents`);
+        if (incidentsRes.ok) {
+          const incidentsData = await incidentsRes.json();
+          setIncidents(incidentsData.items || []);
+          setIncidentStats({
+            active_count: incidentsData.active_count || 0,
+            review_count: incidentsData.review_count || 0,
+            resolved_count: incidentsData.resolved_count || 0,
+          });
+        }
+      } catch (e) {
+        console.error('Failed to load incidents:', e);
       }
     } catch (e) {
       console.error('Failed to load initial data:', e);
@@ -177,6 +193,13 @@ export function useWebSocket() {
           });
         } else if (data.type === 'alert') {
           setAlerts(prev => [data.alert, ...prev].slice(0, 100));
+        } else if (data.type === 'incidents_update') {
+          setIncidents(data.items || []);
+          setIncidentStats({
+            active_count: data.active_count || 0,
+            review_count: data.review_count || 0,
+            resolved_count: data.resolved_count || 0,
+          });
         } else if (data.type === 'probe_result') {
           const targetId = data.target_id;
           if (!resultsRef.current[targetId]) {
@@ -282,6 +305,10 @@ export function useWebSocket() {
     setTargetChangesMap(newMap);
   }, []);
 
+  const setIncidentsData = useCallback((newIncidents) => {
+    setIncidents(newIncidents);
+  }, []);
+
   return {
     connected,
     targets,
@@ -293,6 +320,8 @@ export function useWebSocket() {
     targetRoundResultsMap,
     activeChanges,
     targetChangesMap,
+    incidents,
+    incidentStats,
     getResults,
     getRoundResults,
     setTargets: setTargetsData,
@@ -303,6 +332,7 @@ export function useWebSocket() {
     setObservationMatrix: setObservationMatrixData,
     setActiveChanges: setActiveChangesData,
     setTargetChangesMap: setTargetChangesMapData,
+    setIncidents: setIncidentsData,
     loadInitialData
   };
 }

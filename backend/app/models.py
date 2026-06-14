@@ -381,3 +381,91 @@ class SLOBudgetSnapshot(Base):
     change_induced = Column(Float, default=0)
 
     slo = relationship("SLOTarget", backref="snapshots")
+
+
+class Incident(Base):
+    __tablename__ = "incidents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(512), nullable=False)
+    description = Column(Text, nullable=True)
+    severity = Column(String(20), default="warning")
+    status = Column(String(30), default="active", index=True)
+    first_anomaly_at = Column(DateTime, nullable=False, index=True)
+    last_anomaly_at = Column(DateTime, nullable=False)
+    recovered_at = Column(DateTime, nullable=True, index=True)
+    bleed_over_until = Column(DateTime, nullable=True)
+    mitigated = Column(Boolean, default=False)
+    mitigated_at = Column(DateTime, nullable=True)
+    owner = Column(String(100), nullable=True)
+    acknowledged = Column(Boolean, default=False)
+    acknowledged_at = Column(DateTime, nullable=True)
+    acknowledged_by = Column(String(100), nullable=True)
+    needs_review = Column(Boolean, default=False)
+    review_notes = Column(Text, nullable=True)
+    parent_incident_id = Column(Integer, ForeignKey("incidents.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    parent_incident = relationship("Incident", remote_side=[id], foreign_keys=[parent_incident_id])
+    targets = relationship("IncidentTarget", back_populates="incident", cascade="all, delete-orphan")
+    alerts = relationship("IncidentAlert", back_populates="incident", cascade="all, delete-orphan")
+    timeline = relationship("IncidentTimeline", back_populates="incident", cascade="all, delete-orphan", order_by="IncidentTimeline.timestamp.asc()")
+    notes = relationship("IncidentNote", back_populates="incident", cascade="all, delete-orphan", order_by="IncidentNote.created_at.asc()")
+
+
+class IncidentTarget(Base):
+    __tablename__ = "incident_targets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    incident_id = Column(Integer, ForeignKey("incidents.id"), nullable=False, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False, index=True)
+    role = Column(String(30), default="affected")
+    first_alert_at = Column(DateTime, nullable=True)
+    last_alert_at = Column(DateTime, nullable=True)
+    max_severity = Column(String(20), default="warning")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    incident = relationship("Incident", back_populates="targets")
+    target = relationship("ProbeTarget")
+
+
+class IncidentAlert(Base):
+    __tablename__ = "incident_alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    incident_id = Column(Integer, ForeignKey("incidents.id"), nullable=False, index=True)
+    alert_id = Column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    incident = relationship("Incident", back_populates="alerts")
+    alert = relationship("Alert")
+
+
+class IncidentTimeline(Base):
+    __tablename__ = "incident_timeline"
+
+    id = Column(Integer, primary_key=True, index=True)
+    incident_id = Column(Integer, ForeignKey("incidents.id"), nullable=False, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    event_type = Column(String(50), nullable=False)
+    title = Column(String(512), nullable=False)
+    description = Column(Text, nullable=True)
+    severity = Column(String(20), nullable=True)
+    extra_data = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    incident = relationship("Incident", back_populates="timeline")
+
+
+class IncidentNote(Base):
+    __tablename__ = "incident_notes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    incident_id = Column(Integer, ForeignKey("incidents.id"), nullable=False, index=True)
+    author = Column(String(100), nullable=False)
+    content = Column(Text, nullable=False)
+    action_type = Column(String(30), default="note")
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    incident = relationship("Incident", back_populates="notes")
