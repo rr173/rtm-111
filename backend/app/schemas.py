@@ -459,3 +459,125 @@ class ObservationMatrixCell(BaseModel):
     latest_status: Optional[str] = None
     latest_latency: Optional[float] = None
     latest_timestamp: Optional[datetime] = None
+
+
+class ChangeTargetCreate(BaseModel):
+    target_id: int
+
+
+class ChangeCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    planned_time: datetime
+    target_ids: List[int] = []
+    notes: Optional[str] = None
+    created_by: Optional[str] = None
+
+
+class ChangeUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    planned_time: Optional[datetime] = None
+    target_ids: Optional[List[int]] = None
+    notes: Optional[str] = None
+
+
+class ChangeTargetResponse(BaseModel):
+    id: int
+    target_id: int
+    target_name: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ChangeEventResponse(BaseModel):
+    id: int
+    event_type: str
+    message: str
+    timestamp: datetime
+    data: Optional[Dict[str, Any]] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ChangeResponse(BaseModel):
+    id: int
+    name: str
+    description: Optional[str] = None
+    planned_time: datetime
+    status: str
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    baseline_snapshot_id: Optional[int] = None
+    result_snapshot_id: Optional[int] = None
+    conclusion: Optional[str] = None
+    conclusion_reason: Optional[str] = None
+    notes: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    targets: List[ChangeTargetResponse] = []
+    events: List[ChangeEventResponse] = []
+    target_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class TargetActiveChange(BaseModel):
+    change_id: int
+    change_name: str
+    change_status: str
+    start_time: Optional[datetime] = None
+
+
+class ChangeStatusDiff(BaseModel):
+    target_id: int
+    target_name: str
+    baseline_status: str
+    current_status: str
+    status_changed: bool
+
+
+class ChangeAlertStats(BaseModel):
+    baseline_count: int
+    current_count: int
+    new_alerts: int
+    resolved_alerts: int
+    target_alerts: Dict[str, int]
+
+
+class ChangeRegionDivergence(BaseModel):
+    target_id: int
+    target_name: str
+    regions: Dict[str, Dict[str, Any]]
+    has_divergence: bool
+    divergent_regions: List[str]
+
+
+class ChangeObservationResponse(BaseModel):
+    change: ChangeResponse
+    target_ids: List[int]
+    target_names: List[str]
+    downstream_target_ids: List[int]
+    downstream_target_names: List[str]
+    all_target_ids: List[int]
+    status_diff: List[ChangeStatusDiff]
+    alert_stats: ChangeAlertStats
+    region_divergence: List[ChangeRegionDivergence]
+    baseline_metrics: Dict[str, Any]
+    current_metrics: Dict[str, Any]
+    alerts_timeline: List[Dict[str, Any]]
+    comparison_result: Optional[Dict[str, Any]] = None
+
+
+class ChangeComparisonResponse(BaseModel):
+    baseline_snapshot: Optional[SnapshotResponse] = None
+    result_snapshot: Optional[SnapshotResponse] = None
+    target_comparisons: List[Dict[str, Any]]
+    overall_summary: Dict[str, Any]
+    conclusion: Optional[str] = None
+    conclusion_reason: Optional[str] = None

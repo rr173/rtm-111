@@ -17,7 +17,7 @@ function getFailureTypeLabel(type) {
   return labels[type] || { text: type, color: '#9ca3af' };
 }
 
-function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause, onToggleSilence, detailData, groups = [], onGroupChange, roundResults = [] }) {
+function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause, onToggleSilence, detailData, groups = [], onGroupChange, roundResults = [], activeChanges = [] }) {
   const [historyData, setHistoryData] = useState(null);
   const [alertsHistory, setAlertsHistory] = useState([]);
   const [selectedGroupId, setSelectedGroupId] = useState(target.group_id || '');
@@ -189,6 +189,15 @@ function TargetCard({ target, expanded, onToggleExpand, onDelete, onTogglePause,
             {target.in_silent_window && <span className="silent-window-badge">静默中</span>}
             {target.adaptive_enabled && <span className="adaptive-badge">自适应</span>}
             {target.rule_id && <span className="rule-badge" title={`绑定规则 #${target.rule_id}`}>📋 规则编排</span>}
+            {activeChanges.length > 0 && activeChanges.map((change, idx) => (
+              <span
+                key={idx}
+                className={`change-badge ${change.change_status}`}
+                title={`变更 #${change.change_id}: ${change.change_name}`}
+              >
+                🛡️ {change.change_name}
+              </span>
+            ))}
           </div>
           {target.cascade_affected && target.cascade_source_name && (
             <div className="cascade-source-info">

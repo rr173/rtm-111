@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal
-from .models import ProbeTarget, Alert, ProbeResult, ProbeGroup, Dependency, ObservationPoint
+from .models import ProbeTarget, Alert, ProbeResult, ProbeGroup, Dependency, ObservationPoint, Change, ChangeTarget
 from .probe_engine import probe_engine
 from .observer_engine import observer_engine
 
@@ -304,6 +304,62 @@ class ConnectionManager:
             self._safe_broadcast({
                 "type": "targets_snapshot",
                 "targets": targets_data
+            })
+        finally:
+            db.close()
+
+    def broadcast_changes_update(self):
+        from sqlalchemy.orm import joinedload
+        db = SessionLocal()
+        try:
+            changes = db.query(Change).filter(
+                Change.status.in_(["pending", "running"])
+            ).options(
+                joinedload(Change.targets)
+            ).order_by(Change.start_time.desc()).all()
+
+            target_changes_map = {}
+            for c in changes:
+                for ct in c.targets:
+                    if ct.target_id not in target_changes_map:
+                        target_changes_map[ct.target_id] = []
+                    target_changes_map[ct.target_id].append({
+                        "change_id": c.id,
+                        "change_name": c.name,
+                        "change_status": c.status,
+                        "start_time": c.start_time.isoformat() if c.start_time else None
+                    })
+
+            changes_data = []
+            for c in changes:
+                targets = []
+                for ct in c.targets:
+                    target = db.query(ProbeTarget).filter(ProbeTarget.id == ct.target_id).first()
+                    targets.append({
+                        "id": ct.id,
+                        "target_id": ct.target_id,
+                        "target_name": target.name if target else "",
+                        "created_at": ct.created_at.isoformat() if ct.created_at else None
+                    })
+                changes_data.append({
+                    "id": c.id,
+                    "name": c.name,
+                    "description": c.description,
+                    "planned_time": c.planned_time.isoformat() if c.planned_time else None,
+                    "status": c.status,
+                    "start_time": c.start_time.isoformat() if c.start_time else None,
+                    "end_time": c.end_time.isoformat() if c.end_time else None,
+                    "notes": c.notes,
+                    "created_by": c.created_by,
+                    "created_at": c.created_at.isoformat() if c.created_at else None,
+                    "targets": targets,
+                    "target_count": len(targets)
+                })
+
+            self._safe_broadcast({
+                "type": "changes_update",
+                "changes": changes_data,
+                "target_changes_map": target_changes_map
             })
         finally:
             db.close()

@@ -33,6 +33,8 @@ export function useWebSocket() {
   const [observers, setObservers] = useState([]);
   const [observationMatrix, setObservationMatrix] = useState(null);
   const [targetRoundResultsMap, setTargetRoundResultsMap] = useState({});
+  const [activeChanges, setActiveChanges] = useState([]);
+  const [targetChangesMap, setTargetChangesMap] = useState({});
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const resultsRef = useRef({});
@@ -42,13 +44,14 @@ export function useWebSocket() {
   const loadInitialData = useCallback(async () => {
     try {
       const apiBase = import.meta.env.VITE_API_HTTP_URL || '';
-      const [targetsRes, groupsRes, alertsRes, depsRes, observersRes, matrixRes] = await Promise.all([
+      const [targetsRes, groupsRes, alertsRes, depsRes, observersRes, matrixRes, changesRes] = await Promise.all([
         fetch(`${apiBase}/api/targets`),
         fetch(`${apiBase}/api/groups`),
         fetch(`${apiBase}/api/alerts?limit=50`),
         fetch(`${apiBase}/api/dependencies`),
         fetch(`${apiBase}/api/observers`),
-        fetch(`${apiBase}/api/observation-matrix`)
+        fetch(`${apiBase}/api/observation-matrix`),
+        fetch(`${apiBase}/api/changes/active`)
       ]);
       if (targetsRes.ok && groupsRes.ok && alertsRes.ok && depsRes.ok) {
         const [targetsData, groupsData, alertsData, depsData] = await Promise.all([
@@ -69,6 +72,11 @@ export function useWebSocket() {
       if (matrixRes.ok) {
         const matrixData = await matrixRes.json();
         setObservationMatrix(matrixData);
+      }
+      if (changesRes.ok) {
+        const changesData = await changesRes.json();
+        setActiveChanges(changesData.changes || []);
+        setTargetChangesMap(changesData.target_changes_map || {});
       }
     } catch (e) {
       console.error('Failed to load initial data:', e);
@@ -154,6 +162,9 @@ export function useWebSocket() {
           setTargets(data.targets || []);
         } else if (data.type === 'dependencies_update') {
           setDependencies(data.dependencies || []);
+        } else if (data.type === 'changes_update') {
+          setActiveChanges(data.changes || []);
+          setTargetChangesMap(data.target_changes_map || {});
         } else if (data.type === 'status_update') {
           setTargets(prev => {
             const idx = prev.findIndex(t => t.id === data.target.id);
@@ -263,6 +274,14 @@ export function useWebSocket() {
     return roundResultsRef.current[targetId] || [];
   }, []);
 
+  const setActiveChangesData = useCallback((newChanges) => {
+    setActiveChanges(newChanges);
+  }, []);
+
+  const setTargetChangesMapData = useCallback((newMap) => {
+    setTargetChangesMap(newMap);
+  }, []);
+
   return {
     connected,
     targets,
@@ -272,6 +291,8 @@ export function useWebSocket() {
     observers,
     observationMatrix,
     targetRoundResultsMap,
+    activeChanges,
+    targetChangesMap,
     getResults,
     getRoundResults,
     setTargets: setTargetsData,
@@ -280,6 +301,8 @@ export function useWebSocket() {
     setDependencies: setDependenciesData,
     setObservers: setObserversData,
     setObservationMatrix: setObservationMatrixData,
+    setActiveChanges: setActiveChangesData,
+    setTargetChangesMap: setTargetChangesMapData,
     loadInitialData
   };
 }

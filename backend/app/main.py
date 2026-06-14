@@ -12,6 +12,7 @@ from .models import (
     ProbeRuleExecution, ProbeRuleStepExecution,
     Snapshot, SnapshotData, SnapshotAlert,
     ObservationPoint, TargetObserverBinding, ObserverProbeResult,
+    Change, ChangeTarget, ChangeEvent,
 )
 from .schemas import (
     ProbeTargetCreate, ProbeTargetUpdate, ProbeTargetResponse,
@@ -28,6 +29,9 @@ from .schemas import (
     SnapshotDetailResponse, SnapshotComparisonResponse,
     ObservationPointCreate, ObservationPointUpdate, ObservationPointResponse,
     TargetObserverBindingCreate,
+    ChangeCreate, ChangeUpdate, ChangeResponse,
+    ChangeObservationResponse, ChangeComparisonResponse,
+    TargetActiveChange,
 )
 from .observer_engine import observer_engine
 from .probe_engine import probe_engine
@@ -366,6 +370,78 @@ def _migrate_database():
                             conn.execute(text(idx_sql))
                     print(f"Created table {table_name}")
 
+            change_tables = {
+                "changes": """
+                    CREATE TABLE changes (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name VARCHAR(255) NOT NULL,
+                        description VARCHAR(1024),
+                        planned_time DATETIME NOT NULL,
+                        status VARCHAR(20) DEFAULT 'pending',
+                        start_time DATETIME,
+                        end_time DATETIME,
+                        baseline_snapshot_id INTEGER,
+                        result_snapshot_id INTEGER,
+                        conclusion VARCHAR(20),
+                        conclusion_reason VARCHAR(1024),
+                        notes VARCHAR(2048),
+                        created_by VARCHAR(100),
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (baseline_snapshot_id) REFERENCES snapshots(id),
+                        FOREIGN KEY (result_snapshot_id) REFERENCES snapshots(id)
+                    )
+                """,
+                "change_targets": """
+                    CREATE TABLE change_targets (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        change_id INTEGER NOT NULL,
+                        target_id INTEGER NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (change_id) REFERENCES changes(id) ON DELETE CASCADE,
+                        FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE CASCADE
+                    )
+                """,
+                "change_events": """
+                    CREATE TABLE change_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        change_id INTEGER NOT NULL,
+                        event_type VARCHAR(50) NOT NULL,
+                        message VARCHAR(1024) NOT NULL,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        data TEXT,
+                        FOREIGN KEY (change_id) REFERENCES changes(id) ON DELETE CASCADE
+                    )
+                """,
+            }
+
+            for table_name, create_sql in change_tables.items():
+                result = conn.execute(text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"))
+                if not result.fetchone():
+                    conn.execute(text(create_sql))
+                    index_sqls = {
+                        "changes": [
+                            "CREATE INDEX idx_changes_status ON changes(status)",
+                            "CREATE INDEX idx_changes_planned_time ON changes(planned_time)",
+                            "CREATE INDEX idx_changes_start_time ON changes(start_time)",
+                            "CREATE INDEX idx_changes_end_time ON changes(end_time)",
+                            "CREATE INDEX idx_changes_created_at ON changes(created_at)",
+                        ],
+                        "change_targets": [
+                            "CREATE INDEX idx_ct_change_id ON change_targets(change_id)",
+                            "CREATE INDEX idx_ct_target_id ON change_targets(target_id)",
+                        ],
+                        "change_events": [
+                            "CREATE INDEX idx_ce_change_id ON change_events(change_id)",
+                            "CREATE INDEX idx_ce_timestamp ON change_events(timestamp)",
+                            "CREATE INDEX idx_ce_event_type ON change_events(event_type)",
+                        ],
+                    }
+                    if table_name in index_sqls:
+                        for idx_sql in index_sqls[table_name]:
+                            conn.execute(text(idx_sql))
+                    print(f"Created table {table_name}")
+
             conn.commit()
         except Exception as e:
             print(f"Migration error: {e}")
@@ -408,6 +484,7 @@ async def startup_event():
     _init_demo_data()
     _init_demo_rules()
     _init_demo_observers()
+    _init_demo_changes()
     await observer_engine.start()
     await probe_engine.start()
 
@@ -2327,3 +2404,1140 @@ def list_observer_regions(db: Session = Depends(get_db)):
     regions = list({o.region for o in observers})
     regions.sort()
     return {"regions": regions}
+
+
+def _change_to_response(change: Change, db: Session) -> dict:
+    targets = []
+    for ct in change.targets:
+        target = db.query(ProbeTarget).filter(ProbeTarget.id == ct.target_id).first()
+        targets.append({
+            "id": ct.id,
+            "target_id": ct.target_id,
+            "target_name": target.name if target else "",
+            "created_at": ct.created_at
+        })
+
+    events = []
+    for e in sorted(change.events, key=lambda x: x.timestamp, reverse=True):
+        events.append({
+            "id": e.id,
+            "event_type": e.event_type,
+            "message": e.message,
+            "timestamp": e.timestamp,
+            "data": e.data
+        })
+
+    return {
+        "id": change.id,
+        "name": change.name,
+        "description": change.description,
+        "planned_time": change.planned_time,
+        "status": change.status,
+        "start_time": change.start_time,
+        "end_time": change.end_time,
+        "baseline_snapshot_id": change.baseline_snapshot_id,
+        "result_snapshot_id": change.result_snapshot_id,
+        "conclusion": change.conclusion,
+        "conclusion_reason": change.conclusion_reason,
+        "notes": change.notes,
+        "created_by": change.created_by,
+        "created_at": change.created_at,
+        "updated_at": change.updated_at,
+        "targets": targets,
+        "events": events,
+        "target_count": len(targets)
+    }
+
+
+def _add_change_event(db: Session, change_id: int, event_type: str, message: str, data: dict = None):
+    event = ChangeEvent(
+        change_id=change_id,
+        event_type=event_type,
+        message=message,
+        timestamp=datetime.utcnow(),
+        data=data
+    )
+    db.add(event)
+    db.flush()
+    return event
+
+
+def _get_change_target_ids(db: Session, change_id: int) -> List[int]:
+    bindings = db.query(ChangeTarget).filter(ChangeTarget.change_id == change_id).all()
+    return [b.target_id for b in bindings]
+
+
+def _get_all_affected_target_ids(db: Session, change_id: int) -> List[int]:
+    direct_target_ids = _get_change_target_ids(db, change_id)
+    all_ids = set(direct_target_ids)
+
+    for tid in direct_target_ids:
+        downstream = _get_downstream_targets(db, tid)
+        for dt in downstream:
+            all_ids.add(dt.id)
+
+    return sorted(list(all_ids))
+
+
+def _create_snapshot_for_change(db: Session, change: Change, target_ids: List[int], snapshot_name: str) -> Snapshot:
+    now = datetime.utcnow()
+    start_time = now - timedelta(minutes=10)
+
+    snapshot = Snapshot(
+        name=snapshot_name,
+        description=f"自动创建 - {change.name}",
+        start_time=start_time,
+        end_time=now,
+        created_at=now
+    )
+    db.add(snapshot)
+    db.flush()
+
+    target_ids_set = set(target_ids)
+    results = []
+    for tid in target_ids:
+        target = db.query(ProbeTarget).filter(ProbeTarget.id == tid).first()
+        if not target:
+            continue
+
+        probe_results = db.query(ProbeResult).filter(
+            ProbeResult.target_id == tid,
+            ProbeResult.timestamp >= start_time
+        ).order_by(ProbeResult.timestamp.asc()).all()
+
+        for r in probe_results:
+            sd = SnapshotData(
+                snapshot_id=snapshot.id,
+                target_id=tid,
+                target_name=target.name,
+                timestamp=r.timestamp,
+                status=target.status,
+                latency_ms=r.latency_ms,
+                success=r.success,
+                consecutive_failures=target.consecutive_failures,
+                consecutive_successes=target.consecutive_successes,
+                error_message=r.error_message
+            )
+            db.add(sd)
+            results.append(r)
+
+    alerts = db.query(Alert).filter(
+        Alert.target_id.in_(list(target_ids_set)),
+        Alert.timestamp >= start_time
+    ).all()
+
+    for alert in alerts:
+        target = db.query(ProbeTarget).filter(ProbeTarget.id == alert.target_id).first()
+        snapshot_alert = SnapshotAlert(
+            snapshot_id=snapshot.id,
+            target_id=alert.target_id,
+            target_name=target.name if target else "",
+            timestamp=alert.timestamp,
+            from_status=alert.from_status,
+            to_status=alert.to_status
+        )
+        db.add(snapshot_alert)
+
+    snapshot.target_count = len(target_ids)
+    snapshot.data_point_count = len(results)
+
+    db.commit()
+    db.refresh(snapshot)
+    return snapshot
+
+
+def _analyze_change_conclusion(db: Session, change: Change) -> tuple:
+    if not change.baseline_snapshot_id or not change.result_snapshot_id:
+        return None, None
+
+    baseline = db.query(Snapshot).filter(Snapshot.id == change.baseline_snapshot_id).first()
+    result = db.query(Snapshot).filter(Snapshot.id == change.result_snapshot_id).first()
+
+    if not baseline or not result:
+        return None, None
+
+    baseline_data = db.query(SnapshotData).filter(SnapshotData.snapshot_id == baseline.id).all()
+    result_data = db.query(SnapshotData).filter(SnapshotData.snapshot_id == result.id).all()
+
+    baseline_by_target = {}
+    for d in baseline_data:
+        if d.target_name not in baseline_by_target:
+            baseline_by_target[d.target_name] = []
+        baseline_by_target[d.target_name].append(d)
+
+    result_by_target = {}
+    for d in result_data:
+        if d.target_name not in result_by_target:
+            result_by_target[d.target_name] = []
+        result_by_target[d.target_name].append(d)
+
+    common_targets = set(baseline_by_target.keys()) & set(result_by_target.keys())
+
+    degraded_targets = []
+    improved_targets = []
+    total_availability_drop = 0
+
+    for target_name in common_targets:
+        b_data = baseline_by_target[target_name]
+        r_data = result_by_target[target_name]
+
+        b_stats = _calculate_stats(b_data)
+        r_stats = _calculate_stats(r_data)
+
+        availability_drop = b_stats["availability"] - r_stats["availability"]
+        latency_increase = r_stats["p95"] - b_stats["p95"]
+
+        if availability_drop > 10 or latency_increase > 200:
+            degraded_targets.append({
+                "target_name": target_name,
+                "availability_drop": round(availability_drop, 2),
+                "latency_increase": round(latency_increase, 2)
+            })
+        elif availability_drop < -5 or latency_increase < -50:
+            improved_targets.append(target_name)
+
+        total_availability_drop += availability_drop
+
+    avg_availability_drop = total_availability_drop / len(common_targets) if common_targets else 0
+
+    if len(degraded_targets) >= 2 or avg_availability_drop > 15:
+        conclusion = "rollback"
+        reason = f"检测到严重降级: {len(degraded_targets)} 个目标可用性下降超过10%或P95延迟增加超过200ms。建议立即回滚。"
+        if degraded_targets:
+            reason += " 受影响目标: " + ", ".join([t["target_name"] for t in degraded_targets[:3]])
+    elif len(degraded_targets) >= 1 or avg_availability_drop > 5:
+        conclusion = "observe"
+        reason = f"检测到轻微降级: {len(degraded_targets)} 个目标出现性能下降。建议继续观察并准备回滚预案。"
+    else:
+        conclusion = "pass"
+        reason = "变更通过所有指标检查。"
+        if improved_targets:
+            reason += f" 有 {len(improved_targets)} 个目标性能有所提升。"
+
+    return conclusion, reason
+
+
+def _calculate_metrics_for_targets(db: Session, target_ids: List[int], since_time: datetime) -> dict:
+    if not target_ids:
+        return {"availability": 0, "avg_latency": 0, "p95_latency": 0, "healthy_count": 0, "total": 0}
+
+    results = db.query(ProbeResult).filter(
+        ProbeResult.target_id.in_(target_ids),
+        ProbeResult.timestamp >= since_time
+    ).all()
+
+    if not results:
+        return {"availability": 0, "avg_latency": 0, "p95_latency": 0, "healthy_count": 0, "total": len(target_ids)}
+
+    stats = _calculate_stats(results)
+
+    targets = db.query(ProbeTarget).filter(ProbeTarget.id.in_(target_ids)).all()
+    healthy_count = sum(1 for t in targets if t.status == "healthy")
+
+    return {
+        "availability": round(stats["availability"], 2),
+        "avg_latency": round(stats["p50"], 2),
+        "p95_latency": round(stats["p95"], 2),
+        "p99_latency": round(stats["p99"], 2),
+        "healthy_count": healthy_count,
+        "total": len(targets),
+        "degraded_count": sum(1 for t in targets if t.status == "degraded"),
+        "down_count": sum(1 for t in targets if t.status == "down")
+    }
+
+
+def _get_region_divergence(db: Session, target_ids: List[int]) -> List[dict]:
+    result = []
+    for tid in target_ids:
+        target = db.query(ProbeTarget).filter(ProbeTarget.id == tid).first()
+        if not target:
+            continue
+
+        round_history = observer_engine.get_target_round_history(tid, limit=10)
+        if not round_history:
+            continue
+
+        latest_round = round_history[0] if round_history else None
+        if not latest_round or "results" not in latest_round:
+            continue
+
+        regions = {}
+        success_by_region = {}
+        for r in latest_round["results"]:
+            region = r.get("observer_region", "unknown")
+            if region not in regions:
+                regions[region] = {"success": 0, "total": 0, "latencies": []}
+            regions[region]["total"] += 1
+            if r.get("success", False):
+                regions[region]["success"] += 1
+                if r.get("latency_ms"):
+                    regions[region]["latencies"].append(r["latency_ms"])
+
+        for region, data in regions.items():
+            data["success_rate"] = (data["success"] / data["total"] * 100) if data["total"] > 0 else 0
+            if data["latencies"]:
+                data["avg_latency"] = sum(data["latencies"]) / len(data["latencies"])
+            else:
+                data["avg_latency"] = 0
+
+        has_divergence = False
+        divergent_regions = []
+        success_rates = [r["success_rate"] for r in regions.values()]
+        if success_rates:
+            rate_range = max(success_rates) - min(success_rates)
+            if rate_range > 30:
+                has_divergence = True
+                for region, data in regions.items():
+                    if data["success_rate"] < 70:
+                        divergent_regions.append(region)
+
+        result.append({
+            "target_id": tid,
+            "target_name": target.name,
+            "regions": regions,
+            "has_divergence": has_divergence,
+            "divergent_regions": divergent_regions
+        })
+
+    return result
+
+
+def _init_demo_changes():
+    db = next(get_db())
+    try:
+        change_count = db.query(Change).count()
+        if change_count > 0:
+            return
+
+        now = datetime.utcnow()
+        target1 = db.query(ProbeTarget).filter(ProbeTarget.name.like("%健康%")).first()
+        target2 = db.query(ProbeTarget).filter(ProbeTarget.name.like("%间歇%")).first()
+        target3 = db.query(ProbeTarget).filter(ProbeTarget.name.like("%API网关%")).first()
+
+        if not target1 or not target2:
+            return
+
+        change1 = Change(
+            name="核心服务版本 v2.3.1 发布",
+            description="用户中心服务版本升级，包含性能优化和Bug修复",
+            planned_time=now,
+            status="running",
+            start_time=now - timedelta(minutes=5),
+            notes="灰度发布中，当前50%流量切到新版本",
+            created_by="运维团队",
+            created_at=now - timedelta(hours=1),
+            updated_at=now
+        )
+        db.add(change1)
+        db.flush()
+
+        ct1_1 = ChangeTarget(change_id=change1.id, target_id=target1.id, created_at=now - timedelta(hours=1))
+        ct1_2 = ChangeTarget(change_id=change1.id, target_id=target3.id if target3 else target2.id, created_at=now - timedelta(hours=1))
+        db.add_all([ct1_1, ct1_2])
+        db.flush()
+
+        baseline_snapshot1 = _create_snapshot_for_change(db, change1, [target1.id, target3.id if target3 else target2.id], "基线快照 - 核心服务版本 v2.3.1 发布")
+        change1.baseline_snapshot_id = baseline_snapshot1.id
+        db.flush()
+
+        _add_change_event(db, change1.id, "created", "变更已创建，等待开始")
+        _add_change_event(db, change1.id, "started", "变更已开始，进入守护模式", {"baseline_snapshot_id": baseline_snapshot1.id})
+        _add_change_event(db, change1.id, "progress", "灰度发布进度: 50%流量已切换")
+
+        change2 = Change(
+            name="数据库配置参数调优",
+            description="调整数据库连接池参数和查询超时设置",
+            planned_time=now - timedelta(hours=3),
+            status="completed",
+            start_time=now - timedelta(hours=2, minutes=50),
+            end_time=now - timedelta(hours=1, minutes=30),
+            conclusion="pass",
+            conclusion_reason="变更通过所有指标检查。有 1 个目标性能有所提升。",
+            notes="连接池从 100 调整到 200，查询超时从 30s 调整到 15s",
+            created_by="DBA团队",
+            created_at=now - timedelta(hours=4),
+            updated_at=now - timedelta(hours=1, minutes=30)
+        )
+        db.add(change2)
+        db.flush()
+
+        ct2_1 = ChangeTarget(change_id=change2.id, target_id=target2.id, created_at=now - timedelta(hours=4))
+        db.add(ct2_1)
+        db.flush()
+
+        baseline_snapshot2 = Snapshot(
+            name="基线快照 - 数据库配置参数调优",
+            description=f"自动创建 - {change2.name}",
+            start_time=now - timedelta(hours=3),
+            end_time=now - timedelta(hours=2, minutes=50),
+            target_count=1,
+            data_point_count=15,
+            created_at=now - timedelta(hours=2, minutes=50)
+        )
+        db.add(baseline_snapshot2)
+        db.flush()
+
+        result_snapshot2 = Snapshot(
+            name="结果快照 - 数据库配置参数调优",
+            description=f"自动创建 - {change2.name}",
+            start_time=now - timedelta(hours=1, minutes=40),
+            end_time=now - timedelta(hours=1, minutes=30),
+            target_count=1,
+            data_point_count=15,
+            created_at=now - timedelta(hours=1, minutes=30)
+        )
+        db.add(result_snapshot2)
+        db.flush()
+
+        for i in range(15):
+            t = now - timedelta(hours=3) + timedelta(minutes=i)
+            success = i < 10 or i % 3 == 0
+            db.add(SnapshotData(
+                snapshot_id=baseline_snapshot2.id,
+                target_id=target2.id,
+                target_name=target2.name,
+                timestamp=t,
+                status="degraded" if not success else "healthy",
+                latency_ms=150 + i * 5 if success else None,
+                success=success,
+                consecutive_failures=0 if success else 3,
+                consecutive_successes=3 if success else 0,
+                error_message=None if success else "模拟数据库连接超时"
+            ))
+
+        for i in range(15):
+            t = now - timedelta(hours=1, minutes=40) + timedelta(minutes=i)
+            success = i < 12 or i % 4 == 0
+            db.add(SnapshotData(
+                snapshot_id=result_snapshot2.id,
+                target_id=target2.id,
+                target_name=target2.name,
+                timestamp=t,
+                status="degraded" if not success else "healthy",
+                latency_ms=100 + i * 3 if success else None,
+                success=success,
+                consecutive_failures=0 if success else 2,
+                consecutive_successes=5 if success else 0,
+                error_message=None if success else "数据库查询超时"
+            ))
+
+        db.add(SnapshotAlert(
+            snapshot_id=baseline_snapshot2.id,
+            target_id=target2.id,
+            target_name=target2.name,
+            timestamp=now - timedelta(hours=2, minutes=55),
+            from_status="healthy",
+            to_status="degraded"
+        ))
+
+        change2.baseline_snapshot_id = baseline_snapshot2.id
+        change2.result_snapshot_id = result_snapshot2.id
+        db.flush()
+
+        _add_change_event(db, change2.id, "created", "变更已创建，等待开始", {"planned_time": (now - timedelta(hours=3)).isoformat()})
+        _add_change_event(db, change2.id, "started", "变更已开始，进入守护模式", {"baseline_snapshot_id": baseline_snapshot2.id})
+        _add_change_event(db, change2.id, "progress", "配置参数已更新，正在观察效果")
+        _add_change_event(db, change2.id, "snapshot_created", "结果快照已创建", {"result_snapshot_id": result_snapshot2.id})
+        _add_change_event(db, change2.id, "conclusion", "变更结论: 通过", {"conclusion": "pass", "reason": "变更通过所有指标检查。"})
+        _add_change_event(db, change2.id, "completed", "变更已完成")
+
+        change3 = Change(
+            name="第三方支付网关切换",
+            description="将支付网关从供应商A切换到供应商B",
+            planned_time=now - timedelta(days=1),
+            status="completed",
+            start_time=now - timedelta(days=1, hours=2),
+            end_time=now - timedelta(days=1, hours=1),
+            conclusion="rollback",
+            conclusion_reason="检测到严重降级: 1 个目标可用性下降超过10%或P95延迟增加超过200ms。建议立即回滚。受影响目标: 示例服务-间歇故障",
+            notes="已回滚到供应商A，正在排查问题",
+            created_by="支付团队",
+            created_at=now - timedelta(days=1, hours=3),
+            updated_at=now - timedelta(days=1)
+        )
+        db.add(change3)
+        db.flush()
+
+        ct3_1 = ChangeTarget(change_id=change3.id, target_id=target2.id, created_at=now - timedelta(days=1, hours=3))
+        db.add(ct3_1)
+        db.flush()
+
+        baseline_snapshot3 = Snapshot(
+            name="基线快照 - 第三方支付网关切换",
+            description=f"自动创建 - {change3.name}",
+            start_time=now - timedelta(days=1, hours=2, minutes=10),
+            end_time=now - timedelta(days=1, hours=2),
+            target_count=1,
+            data_point_count=20,
+            created_at=now - timedelta(days=1, hours=2)
+        )
+        db.add(baseline_snapshot3)
+        db.flush()
+
+        result_snapshot3 = Snapshot(
+            name="结果快照 - 第三方支付网关切换",
+            description=f"自动创建 - {change3.name}",
+            start_time=now - timedelta(days=1, hours=1, minutes=10),
+            end_time=now - timedelta(days=1, hours=1),
+            target_count=1,
+            data_point_count=20,
+            created_at=now - timedelta(days=1, hours=1)
+        )
+        db.add(result_snapshot3)
+        db.flush()
+
+        for i in range(20):
+            t = now - timedelta(days=1, hours=2, minutes=10) + timedelta(seconds=i * 30)
+            success = i % 4 != 0
+            db.add(SnapshotData(
+                snapshot_id=baseline_snapshot3.id,
+                target_id=target2.id,
+                target_name=target2.name,
+                timestamp=t,
+                status="degraded" if not success else "healthy",
+                latency_ms=80 + i * 2 if success else None,
+                success=success,
+                consecutive_failures=0 if success else 1,
+                consecutive_successes=3 if success else 0,
+                error_message=None if success else "连接超时"
+            ))
+
+        for i in range(20):
+            t = now - timedelta(days=1, hours=1, minutes=10) + timedelta(seconds=i * 30)
+            success = i < 5 or i > 15
+            db.add(SnapshotData(
+                snapshot_id=result_snapshot3.id,
+                target_id=target2.id,
+                target_name=target2.name,
+                timestamp=t,
+                status="down" if not success else "degraded",
+                latency_ms=300 + i * 5 if success else None,
+                success=success,
+                consecutive_failures=0 if success else 8,
+                consecutive_successes=1 if success else 0,
+                error_message=None if success else "网关无响应"
+            ))
+
+        db.add(SnapshotAlert(
+            snapshot_id=result_snapshot3.id,
+            target_id=target2.id,
+            target_name=target2.name,
+            timestamp=now - timedelta(days=1, hours=1, minutes=5),
+            from_status="degraded",
+            to_status="down"
+        ))
+
+        change3.baseline_snapshot_id = baseline_snapshot3.id
+        change3.result_snapshot_id = result_snapshot3.id
+        db.flush()
+
+        _add_change_event(db, change3.id, "created", "变更已创建，等待开始")
+        _add_change_event(db, change3.id, "started", "变更已开始，进入守护模式")
+        _add_change_event(db, change3.id, "alert", "检测到严重告警: 服务状态变为 down")
+        _add_change_event(db, change3.id, "conclusion", "变更结论: 建议回滚", {"conclusion": "rollback"})
+        _add_change_event(db, change3.id, "rollback", "已执行回滚操作")
+        _add_change_event(db, change3.id, "completed", "变更已完成（已回滚）")
+
+        db.commit()
+        print("Demo changes initialized")
+    except Exception as e:
+        print(f"Demo changes init error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.rollback()
+    finally:
+        db.close()
+
+
+@app.get("/api/changes", response_model=List[ChangeResponse])
+def list_changes(
+    status: str = None,
+    search: str = "",
+    start_date: str = None,
+    end_date: str = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(Change).options(
+        joinedload(Change.targets),
+        joinedload(Change.events)
+    )
+
+    if status:
+        query = query.filter(Change.status == status)
+
+    if search:
+        search_pattern = f"%{search}%"
+        query = query.filter(
+            (Change.name.like(search_pattern)) |
+            (Change.description.like(search_pattern))
+        )
+
+    if start_date:
+        try:
+            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            query = query.filter(Change.planned_time >= start_dt)
+        except:
+            pass
+
+    if end_date:
+        try:
+            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            query = query.filter(Change.planned_time <= end_dt)
+        except:
+            pass
+
+    changes = query.order_by(Change.planned_time.desc()).all()
+    return [_change_to_response(c, db) for c in changes]
+
+
+@app.get("/api/changes/active")
+def list_active_changes(db: Session = Depends(get_db)):
+    changes = db.query(Change).filter(
+        Change.status.in_(["pending", "running"])
+    ).options(
+        joinedload(Change.targets)
+    ).order_by(Change.start_time.desc()).all()
+
+    target_changes_map = {}
+    for c in changes:
+        for ct in c.targets:
+            if ct.target_id not in target_changes_map:
+                target_changes_map[ct.target_id] = []
+            target_changes_map[ct.target_id].append({
+                "change_id": c.id,
+                "change_name": c.name,
+                "change_status": c.status,
+                "start_time": c.start_time
+            })
+
+    return {
+        "changes": [_change_to_response(c, db) for c in changes],
+        "target_changes_map": target_changes_map
+    }
+
+
+@app.get("/api/changes/{change_id}", response_model=ChangeResponse)
+def get_change(change_id: int, db: Session = Depends(get_db)):
+    change = db.query(Change).options(
+        joinedload(Change.targets),
+        joinedload(Change.events)
+    ).filter(Change.id == change_id).first()
+
+    if not change:
+        raise HTTPException(status_code=404, detail="Change not found")
+
+    return _change_to_response(change, db)
+
+
+@app.post("/api/changes", response_model=ChangeResponse)
+def create_change(change_create: ChangeCreate, db: Session = Depends(get_db)):
+    now = datetime.utcnow()
+
+    change = Change(
+        name=change_create.name,
+        description=change_create.description,
+        planned_time=change_create.planned_time,
+        status="pending",
+        notes=change_create.notes,
+        created_by=change_create.created_by,
+        created_at=now,
+        updated_at=now
+    )
+    db.add(change)
+    db.flush()
+
+    for target_id in change_create.target_ids:
+        target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+        if target:
+            ct = ChangeTarget(
+                change_id=change.id,
+                target_id=target_id,
+                created_at=now
+            )
+            db.add(ct)
+
+    db.flush()
+    _add_change_event(db, change.id, "created", "变更已创建，等待开始")
+
+    db.commit()
+    db.refresh(change)
+
+    manager.broadcast_changes_update()
+
+    return _change_to_response(change, db)
+
+
+@app.put("/api/changes/{change_id}", response_model=ChangeResponse)
+def update_change(change_id: int, change_update: ChangeUpdate, db: Session = Depends(get_db)):
+    change = db.query(Change).filter(Change.id == change_id).first()
+    if not change:
+        raise HTTPException(status_code=404, detail="Change not found")
+
+    if change.status in ["completed", "cancelled"]:
+        raise HTTPException(status_code=400, detail="Cannot update a completed or cancelled change")
+
+    now = datetime.utcnow()
+
+    if change_update.name is not None:
+        change.name = change_update.name
+    if change_update.description is not None:
+        change.description = change_update.description
+    if change_update.planned_time is not None:
+        change.planned_time = change_update.planned_time
+    if change_update.notes is not None:
+        change.notes = change_update.notes
+
+    if change_update.target_ids is not None and change.status == "pending":
+        db.query(ChangeTarget).filter(ChangeTarget.change_id == change_id).delete()
+        for target_id in change_update.target_ids:
+            target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+            if target:
+                ct = ChangeTarget(
+                    change_id=change.id,
+                    target_id=target_id,
+                    created_at=now
+                )
+                db.add(ct)
+
+    change.updated_at = now
+    db.commit()
+    db.refresh(change)
+
+    manager.broadcast_changes_update()
+
+    return _change_to_response(change, db)
+
+
+@app.delete("/api/changes/{change_id}")
+def delete_change(change_id: int, db: Session = Depends(get_db)):
+    change = db.query(Change).filter(Change.id == change_id).first()
+    if not change:
+        raise HTTPException(status_code=404, detail="Change not found")
+
+    if change.status == "running":
+        raise HTTPException(status_code=400, detail="Cannot delete a running change. Please end it first.")
+
+    db.delete(change)
+    db.commit()
+
+    manager.broadcast_changes_update()
+
+    return {"message": "Change deleted"}
+
+
+@app.post("/api/changes/{change_id}/start", response_model=ChangeResponse)
+def start_change(change_id: int, db: Session = Depends(get_db)):
+    change = db.query(Change).filter(Change.id == change_id).first()
+    if not change:
+        raise HTTPException(status_code=404, detail="Change not found")
+
+    if change.status != "pending":
+        raise HTTPException(status_code=400, detail=f"Cannot start change with status: {change.status}")
+
+    target_ids = _get_change_target_ids(db, change_id)
+    if not target_ids:
+        raise HTTPException(status_code=400, detail="No targets specified for this change")
+
+    now = datetime.utcnow()
+    change.status = "running"
+    change.start_time = now
+    change.updated_at = now
+
+    snapshot = _create_snapshot_for_change(db, change, target_ids, f"基线快照 - {change.name}")
+    change.baseline_snapshot_id = snapshot.id
+
+    db.flush()
+    _add_change_event(db, change.id, "started", "变更已开始，进入守护模式", {
+        "baseline_snapshot_id": snapshot.id,
+        "target_count": len(target_ids)
+    })
+
+    all_affected_ids = _get_all_affected_target_ids(db, change_id)
+    _add_change_event(db, change.id, "topology", f"变更影响范围: 直接目标 {len(target_ids)} 个，下游依赖 {len(all_affected_ids) - len(target_ids)} 个", {
+        "direct_targets": target_ids,
+        "all_affected_targets": all_affected_ids
+    })
+
+    db.commit()
+    db.refresh(change)
+
+    manager.broadcast_changes_update()
+
+    return _change_to_response(change, db)
+
+
+@app.post("/api/changes/{change_id}/end", response_model=ChangeResponse)
+def end_change(change_id: int, db: Session = Depends(get_db)):
+    change = db.query(Change).filter(Change.id == change_id).first()
+    if not change:
+        raise HTTPException(status_code=404, detail="Change not found")
+
+    if change.status != "running":
+        raise HTTPException(status_code=400, detail=f"Cannot end change with status: {change.status}")
+
+    target_ids = _get_change_target_ids(db, change_id)
+    now = datetime.utcnow()
+    change.status = "completed"
+    change.end_time = now
+    change.updated_at = now
+
+    snapshot = _create_snapshot_for_change(db, change, target_ids, f"结果快照 - {change.name}")
+    change.result_snapshot_id = snapshot.id
+
+    db.flush()
+    _add_change_event(db, change.id, "snapshot_created", "结果快照已创建", {
+        "result_snapshot_id": snapshot.id
+    })
+
+    conclusion, reason = _analyze_change_conclusion(db, change)
+    if conclusion:
+        change.conclusion = conclusion
+        change.conclusion_reason = reason
+        _add_change_event(db, change.id, "conclusion", f"变更结论: {conclusion}", {
+            "conclusion": conclusion,
+            "reason": reason
+        })
+
+    _add_change_event(db, change.id, "completed", "变更已完成")
+
+    db.commit()
+    db.refresh(change)
+
+    manager.broadcast_changes_update()
+
+    return _change_to_response(change, db)
+
+
+@app.post("/api/changes/{change_id}/cancel", response_model=ChangeResponse)
+def cancel_change(change_id: int, db: Session = Depends(get_db)):
+    change = db.query(Change).filter(Change.id == change_id).first()
+    if not change:
+        raise HTTPException(status_code=404, detail="Change not found")
+
+    if change.status not in ["pending", "running"]:
+        raise HTTPException(status_code=400, detail=f"Cannot cancel change with status: {change.status}")
+
+    now = datetime.utcnow()
+    change.status = "cancelled"
+    change.end_time = now
+    change.updated_at = now
+
+    db.flush()
+    _add_change_event(db, change.id, "cancelled", "变更已取消")
+
+    db.commit()
+    db.refresh(change)
+
+    manager.broadcast_changes_update()
+
+    return _change_to_response(change, db)
+
+
+@app.get("/api/changes/{change_id}/observation", response_model=ChangeObservationResponse)
+def get_change_observation(change_id: int, db: Session = Depends(get_db)):
+    change = db.query(Change).options(
+        joinedload(Change.targets),
+        joinedload(Change.events)
+    ).filter(Change.id == change_id).first()
+
+    if not change:
+        raise HTTPException(status_code=404, detail="Change not found")
+
+    direct_target_ids = _get_change_target_ids(db, change_id)
+    downstream_targets = []
+    for tid in direct_target_ids:
+        dt_list = _get_downstream_targets(db, tid)
+        for dt in dt_list:
+            if dt.id not in direct_target_ids and dt.id not in [t.id for t in downstream_targets]:
+                downstream_targets.append(dt)
+
+    downstream_target_ids = [t.id for t in downstream_targets]
+    all_target_ids = list(set(direct_target_ids + downstream_target_ids))
+
+    direct_targets = db.query(ProbeTarget).filter(ProbeTarget.id.in_(direct_target_ids)).all()
+    downstream_targets_full = db.query(ProbeTarget).filter(ProbeTarget.id.in_(downstream_target_ids)).all()
+
+    baseline_time = change.start_time if change.start_time else change.planned_time
+    baseline_window_start = baseline_time - timedelta(minutes=10)
+
+    current_time = datetime.utcnow()
+    current_window_start = current_time - timedelta(minutes=10)
+
+    baseline_metrics = _calculate_metrics_for_targets(db, all_target_ids, baseline_window_start)
+    current_metrics = _calculate_metrics_for_targets(db, all_target_ids, current_window_start)
+
+    status_diff = []
+    for tid in all_target_ids:
+        target = db.query(ProbeTarget).filter(ProbeTarget.id == tid).first()
+        if not target:
+            continue
+
+        baseline_result = db.query(ProbeResult).filter(
+            ProbeResult.target_id == tid,
+            ProbeResult.timestamp >= baseline_window_start
+        ).order_by(ProbeResult.timestamp.desc()).first()
+
+        baseline_status = "healthy"
+        if baseline_result:
+            if not baseline_result.success:
+                baseline_status = "degraded"
+
+        current_status = target.status
+        status_diff.append({
+            "target_id": tid,
+            "target_name": target.name,
+            "baseline_status": baseline_status,
+            "current_status": current_status,
+            "status_changed": baseline_status != current_status
+        })
+
+    baseline_alerts = db.query(Alert).filter(
+        Alert.target_id.in_(all_target_ids),
+        Alert.timestamp >= baseline_window_start,
+        Alert.timestamp < baseline_time
+    ).count()
+
+    current_alerts = db.query(Alert).filter(
+        Alert.target_id.in_(all_target_ids),
+        Alert.timestamp >= current_window_start
+    ).count()
+
+    alerts_since_change = db.query(Alert).filter(
+        Alert.target_id.in_(all_target_ids),
+        Alert.timestamp >= baseline_time
+    ).order_by(Alert.timestamp.desc()).all()
+
+    alert_target_counts = {}
+    for a in alerts_since_change:
+        if a.target_id not in alert_target_counts:
+            target = db.query(ProbeTarget).filter(ProbeTarget.id == a.target_id).first()
+            alert_target_counts[a.target_id] = {"name": target.name if target else "", "count": 0}
+        alert_target_counts[a.target_id]["count"] += 1
+
+    target_alerts_dict = {}
+    for tid, info in alert_target_counts.items():
+        target_alerts_dict[info["name"]] = info["count"]
+
+    alerts_timeline = []
+    for a in alerts_since_change:
+        target = db.query(ProbeTarget).filter(ProbeTarget.id == a.target_id).first()
+        alerts_timeline.append({
+            "id": a.id,
+            "target_id": a.target_id,
+            "target_name": target.name if target else "",
+            "timestamp": a.timestamp,
+            "from_status": a.from_status,
+            "to_status": a.to_status,
+            "acknowledged": a.acknowledged
+        })
+
+    region_divergence = _get_region_divergence(db, direct_target_ids)
+
+    comparison_result = None
+    if change.baseline_snapshot_id and change.result_snapshot_id:
+        comparison_res = compare_snapshots_internal(db, change.baseline_snapshot_id, change.result_snapshot_id)
+        comparison_result = comparison_res
+
+    change_response = _change_to_response(change, db)
+
+    return {
+        "change": change_response,
+        "target_ids": direct_target_ids,
+        "target_names": [t.name for t in direct_targets],
+        "downstream_target_ids": downstream_target_ids,
+        "downstream_target_names": [t.name for t in downstream_targets_full],
+        "all_target_ids": all_target_ids,
+        "status_diff": status_diff,
+        "alert_stats": {
+            "baseline_count": baseline_alerts,
+            "current_count": current_alerts,
+            "new_alerts": len(alerts_since_change),
+            "resolved_alerts": max(0, baseline_alerts - current_alerts),
+            "target_alerts": target_alerts_dict
+        },
+        "region_divergence": region_divergence,
+        "baseline_metrics": baseline_metrics,
+        "current_metrics": current_metrics,
+        "alerts_timeline": alerts_timeline,
+        "comparison_result": comparison_result
+    }
+
+
+@app.get("/api/changes/{change_id}/comparison", response_model=ChangeComparisonResponse)
+def get_change_comparison(change_id: int, db: Session = Depends(get_db)):
+    change = db.query(Change).filter(Change.id == change_id).first()
+    if not change:
+        raise HTTPException(status_code=404, detail="Change not found")
+
+    baseline_snapshot = None
+    result_snapshot = None
+
+    if change.baseline_snapshot_id:
+        baseline_snapshot = db.query(Snapshot).filter(Snapshot.id == change.baseline_snapshot_id).first()
+    if change.result_snapshot_id:
+        result_snapshot = db.query(Snapshot).filter(Snapshot.id == change.result_snapshot_id).first()
+
+    if not baseline_snapshot or not result_snapshot:
+        return {
+            "baseline_snapshot": baseline_snapshot,
+            "result_snapshot": result_snapshot,
+            "target_comparisons": [],
+            "overall_summary": {"message": "快照数据不完整，无法进行对比"},
+            "conclusion": change.conclusion,
+            "conclusion_reason": change.conclusion_reason
+        }
+
+    comparison_data = compare_snapshots_internal(db, change.baseline_snapshot_id, change.result_snapshot_id)
+
+    degraded_count = sum(1 for c in comparison_data["comparisons"] if c.get("degraded", False))
+    improved_count = sum(1 for c in comparison_data["comparisons"] if c["diff"]["availability"] > 0)
+    total_targets = len(comparison_data["common_targets"])
+
+    summary = {
+        "total_targets": total_targets,
+        "degraded_count": degraded_count,
+        "improved_count": improved_count,
+        "unchanged_count": total_targets - degraded_count - improved_count,
+        "avg_availability_change": sum(c["diff"]["availability"] for c in comparison_data["comparisons"]) / total_targets if total_targets > 0 else 0,
+        "avg_p95_change": sum(c["diff"]["p95"] for c in comparison_data["comparisons"]) / total_targets if total_targets > 0 else 0
+    }
+
+    return {
+        "baseline_snapshot": baseline_snapshot,
+        "result_snapshot": result_snapshot,
+        "target_comparisons": comparison_data["comparisons"],
+        "overall_summary": summary,
+        "conclusion": change.conclusion,
+        "conclusion_reason": change.conclusion_reason
+    }
+
+
+def compare_snapshots_internal(db: Session, snapshot_a_id: int, snapshot_b_id: int) -> dict:
+    snapshot_a = db.query(Snapshot).filter(Snapshot.id == snapshot_a_id).first()
+    snapshot_b = db.query(Snapshot).filter(Snapshot.id == snapshot_b_id).first()
+
+    if not snapshot_a or not snapshot_b:
+        return {"common_targets": [], "comparisons": []}
+
+    data_a = db.query(SnapshotData).filter(SnapshotData.snapshot_id == snapshot_a_id).all()
+    data_b = db.query(SnapshotData).filter(SnapshotData.snapshot_id == snapshot_b_id).all()
+
+    targets_a = {}
+    targets_b = {}
+
+    for d in data_a:
+        if d.target_name not in targets_a:
+            targets_a[d.target_name] = []
+        targets_a[d.target_name].append(d)
+
+    for d in data_b:
+        if d.target_name not in targets_b:
+            targets_b[d.target_name] = []
+        targets_b[d.target_name].append(d)
+
+    common_targets = set(targets_a.keys()) & set(targets_b.keys())
+
+    comparisons = []
+    for target_name in common_targets:
+        results_a = targets_a[target_name]
+        results_b = targets_b[target_name]
+
+        stats_a = _calculate_stats(results_a)
+        stats_b = _calculate_stats(results_b)
+
+        diff = {
+            "availability": stats_b["availability"] - stats_a["availability"],
+            "p50": stats_b["p50"] - stats_a["p50"],
+            "p95": stats_b["p95"] - stats_a["p95"],
+            "p99": stats_b["p99"] - stats_a["p99"],
+        }
+
+        comparisons.append({
+            "target_name": target_name,
+            "snapshot_a": {
+                "stats": stats_a,
+                "data_points": len(results_a)
+            },
+            "snapshot_b": {
+                "stats": stats_b,
+                "data_points": len(results_b)
+            },
+            "diff": diff,
+            "degraded": diff["availability"] < -5 or diff["p95"] > 100
+        })
+
+    return {
+        "common_targets": sorted(list(common_targets)),
+        "comparisons": sorted(comparisons, key=lambda x: x["diff"]["availability"])
+    }
+
+
+@app.get("/api/targets/{target_id}/active-changes", response_model=List[TargetActiveChange])
+def get_target_active_changes(target_id: int, db: Session = Depends(get_db)):
+    target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    changes = db.query(Change).join(ChangeTarget).filter(
+        ChangeTarget.target_id == target_id,
+        Change.status.in_(["pending", "running"])
+    ).order_by(Change.start_time.desc()).all()
+
+    result = []
+    for c in changes:
+        result.append({
+            "change_id": c.id,
+            "change_name": c.name,
+            "change_status": c.status,
+            "start_time": c.start_time
+        })
+
+    return result
+
+
+@app.get("/api/changes/{change_id}/topology")
+def get_change_topology(change_id: int, db: Session = Depends(get_db)):
+    change = db.query(Change).filter(Change.id == change_id).first()
+    if not change:
+        raise HTTPException(status_code=404, detail="Change not found")
+
+    direct_target_ids = _get_change_target_ids(db, change_id)
+    all_affected_ids = _get_all_affected_target_ids(db, change_id)
+
+    targets = db.query(ProbeTarget).filter(ProbeTarget.id.in_(all_affected_ids)).all()
+    dependencies = db.query(Dependency).filter(
+        (Dependency.upstream_id.in_(all_affected_ids)) |
+        (Dependency.downstream_id.in_(all_affected_ids))
+    ).all()
+
+    target_map = {}
+    for t in targets:
+        target_map[t.id] = {
+            "id": t.id,
+            "name": t.name,
+            "status": t.status,
+            "type": t.type,
+            "is_direct": t.id in direct_target_ids,
+            "is_downstream": t.id not in direct_target_ids
+        }
+
+    deps_data = []
+    for d in dependencies:
+        if d.upstream_id in target_map and d.downstream_id in target_map:
+            deps_data.append({
+                "id": d.id,
+                "upstream_id": d.upstream_id,
+                "downstream_id": d.downstream_id,
+                "description": d.description
+            })
+
+    return {
+        "change_id": change_id,
+        "change_name": change.name,
+        "change_status": change.status,
+        "targets": list(target_map.values()),
+        "dependencies": deps_data,
+        "direct_target_count": len(direct_target_ids),
+        "downstream_target_count": len(all_affected_ids) - len(direct_target_ids)
+    }
+

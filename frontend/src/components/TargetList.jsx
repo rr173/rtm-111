@@ -14,7 +14,8 @@ function TargetList({
   onRefreshGroups,
   onRefreshTargets,
   onTargetGroupChange,
-  targetRoundResultsMap = {}
+  targetRoundResultsMap = {},
+  targetChangesMap = {}
 }) {
   const groupedTargets = useMemo(() => {
     const result = {};

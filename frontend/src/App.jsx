@@ -9,6 +9,7 @@ import TopologyPage from './components/TopologyPage';
 import RuleEditor from './components/RuleEditor';
 import SnapshotList from './components/SnapshotList';
 import ObservationMatrix from './components/ObservationMatrix';
+import ChangeGuardianPanel from './components/ChangeGuardianPanel';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
@@ -26,7 +27,9 @@ function App() {
     loadInitialData,
     observers,
     observationMatrix,
-    targetRoundResultsMap
+    targetRoundResultsMap,
+    activeChanges,
+    targetChangesMap
   } = useWebSocket();
   const [activeTab, setActiveTab] = useState('list');
   const [expandedTarget, setExpandedTarget] = useState(null);
@@ -218,6 +221,12 @@ function App() {
             🌐 观测矩阵
           </button>
           <button
+            className={`tab-btn ${activeTab === 'changes' ? 'active' : ''}`}
+            onClick={() => setActiveTab('changes')}
+          >
+            🛡️ 变更守护
+          </button>
+          <button
             className={`tab-btn`}
             onClick={() => setShowRuleEditor(true)}
           >
@@ -253,6 +262,7 @@ function App() {
                 onRefreshTargets={refreshTargets}
                 onTargetGroupChange={handleTargetGroupChange}
                 targetRoundResultsMap={targetRoundResultsMap || {}}
+                targetChangesMap={targetChangesMap}
               />
             </>
           ) : activeTab === 'matrix' ? (
@@ -266,6 +276,12 @@ function App() {
               targets={targets}
               dependencies={dependencies}
               setDependencies={setDependencies}
+            />
+          ) : activeTab === 'changes' ? (
+            <ChangeGuardianPanel
+              targets={targets}
+              activeChanges={activeChanges}
+              targetChangesMap={targetChangesMap}
             />
           ) : (
             <SnapshotList />

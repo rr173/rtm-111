@@ -294,3 +294,53 @@ class SnapshotAlert(Base):
     to_status = Column(String(20), nullable=False)
 
     snapshot = relationship("Snapshot", back_populates="alerts")
+
+
+class Change(Base):
+    __tablename__ = "changes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(String(1024), nullable=True)
+    planned_time = Column(DateTime, nullable=False, index=True)
+    status = Column(String(20), default="pending", index=True)
+    start_time = Column(DateTime, nullable=True, index=True)
+    end_time = Column(DateTime, nullable=True, index=True)
+    baseline_snapshot_id = Column(Integer, ForeignKey("snapshots.id"), nullable=True)
+    result_snapshot_id = Column(Integer, ForeignKey("snapshots.id"), nullable=True)
+    conclusion = Column(String(20), nullable=True)
+    conclusion_reason = Column(String(1024), nullable=True)
+    notes = Column(String(2048), nullable=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    baseline_snapshot = relationship("Snapshot", foreign_keys=[baseline_snapshot_id])
+    result_snapshot = relationship("Snapshot", foreign_keys=[result_snapshot_id])
+    targets = relationship("ChangeTarget", back_populates="change", cascade="all, delete-orphan")
+    events = relationship("ChangeEvent", back_populates="change", cascade="all, delete-orphan")
+
+
+class ChangeTarget(Base):
+    __tablename__ = "change_targets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    change_id = Column(Integer, ForeignKey("changes.id"), nullable=False, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    change = relationship("Change", back_populates="targets")
+    target = relationship("ProbeTarget")
+
+
+class ChangeEvent(Base):
+    __tablename__ = "change_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    change_id = Column(Integer, ForeignKey("changes.id"), nullable=False, index=True)
+    event_type = Column(String(50), nullable=False)
+    message = Column(String(1024), nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    data = Column(JSON, nullable=True)
+
+    change = relationship("Change", back_populates="events")
