@@ -388,10 +388,23 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     import asyncio
+    import os
     loop = asyncio.get_running_loop()
     probe_engine.set_loop(loop)
     manager.set_loop(loop)
     observer_engine.set_loop(loop)
+
+    if os.getenv("RESET_DEMO_DATA", "false").lower() == "true":
+        import shutil
+        db_path = "./data/probes.db"
+        if os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+                print("Demo database reset - removed old probes.db")
+            except Exception as e:
+                print(f"Failed to remove old database: {e}")
+        _init_db_tables()
+
     _init_demo_data()
     _init_demo_rules()
     _init_demo_observers()
@@ -806,7 +819,32 @@ def _init_demo_observers():
     db = next(get_db())
     try:
         observer_count = db.query(ObservationPoint).count()
+        now = datetime.utcnow()
+
         if observer_count > 0:
+            degraded_target = db.query(ProbeTarget).filter(ProbeTarget.name.like("%间歇%")).first()
+            down_target = db.query(ProbeTarget).filter(ProbeTarget.name.like("%不可达%")).first()
+            offline_observer = db.query(ObservationPoint).filter(ObservationPoint.status == "offline").first()
+            healthy_target = db.query(ProbeTarget).filter(ProbeTarget.name.like("%健康%")).first()
+
+            if degraded_target:
+                observer_engine.set_target_simulation_state(degraded_target.id, {
+                    "global_failure": False,
+                    "partial_fail_regions": ["华南"],
+                    "observer_offline_ids": [],
+                })
+            if down_target:
+                observer_engine.set_target_simulation_state(down_target.id, {
+                    "global_failure": True,
+                    "partial_fail_regions": [],
+                    "observer_offline_ids": [],
+                })
+            if offline_observer and healthy_target:
+                observer_engine.set_target_simulation_state(healthy_target.id, {
+                    "global_failure": False,
+                    "partial_fail_regions": [],
+                    "observer_offline_ids": [offline_observer.id],
+                })
             return
 
         now = datetime.utcnow()

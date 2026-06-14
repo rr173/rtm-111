@@ -9,6 +9,7 @@ services:
       - "8000:8000"
     environment:
       - DATABASE_URL=sqlite:///./data/probes.db
+      - RESET_DEMO_DATA=true
     volumes:
       - ./backend/data:/app/data
     restart: unless-stopped

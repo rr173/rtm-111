@@ -14,7 +14,7 @@ from .models import (
 )
 
 
-OBSERVER_HEARTBEAT_TIMEOUT = 30
+OBSERVER_HEARTBEAT_TIMEOUT = 300
 
 
 class ObserverEngine:
@@ -49,11 +49,12 @@ class ObserverEngine:
             observers = db.query(ObservationPoint).all()
             targets = db.query(ProbeTarget).all()
             for target in targets:
-                self._simulated_states[target.id] = {
-                    "global_failure": False,
-                    "partial_fail_regions": [],
-                    "observer_offline_ids": [],
-                }
+                if target.id not in self._simulated_states:
+                    self._simulated_states[target.id] = {
+                        "global_failure": False,
+                        "partial_fail_regions": [],
+                        "observer_offline_ids": [],
+                    }
         finally:
             db.close()
 
@@ -93,10 +94,13 @@ class ObserverEngine:
             db.close()
 
     def _handle_observer_offline(self, db: Session, observer: ObservationPoint):
-        print(f"Observer '{observer.name}' (id={observer.id}) went offline")
+        print(f"Observer '{observer.name}' (id={observer.id}) went offline - tasks will be transferred")
+        self._broadcast_observers_update()
 
     def _handle_observer_back_online(self, db: Session, observer: ObservationPoint):
-        print(f"Observer '{observer.name}' (id={observer.id}) came back online")
+        print(f"Observer '{observer.name}' (id={observer.id}) came back online - tasks will be restored")
+        observer.last_heartbeat = datetime.utcnow()
+        self._broadcast_observers_update()
 
     def heartbeat(self, observer_id: int):
         db = SessionLocal()
@@ -154,45 +158,119 @@ class ObserverEngine:
         db = SessionLocal()
         try:
             round_id = f"rnd_{uuid.uuid4().hex[:12]}"
-            observers = self.get_effective_observers(db, target.id)
-            all_assigned = self.get_target_observers(db, target.id)
 
-            if not observers:
+            if self._simulation_mode:
+                now = datetime.utcnow()
+                keep_offline_ids = set()
+                state = self._simulated_states.get(target.id, {})
+                for oid in state.get("observer_offline_ids", []):
+                    keep_offline_ids.add(oid)
+
+                all_observers = db.query(ObservationPoint).all()
+                for obs in all_observers:
+                    if obs.status == "online" and obs.id not in keep_offline_ids:
+                        obs.last_heartbeat = now
+                    elif obs.status == "offline" and obs.id not in keep_offline_ids:
+                        if obs.last_heartbeat and (now - obs.last_heartbeat).total_seconds() < OBSERVER_HEARTBEAT_TIMEOUT:
+                            obs.status = "online"
+                            obs.last_heartbeat = now
+                db.flush()
+
+            all_assigned = self.get_target_observers(db, target.id)
+            effective_observers = self.get_effective_observers(db, target.id)
+
+            assigned_ids = {o.id for o in all_assigned}
+            effective_ids = {o.id for o in effective_observers}
+            transferred_ids = effective_ids - assigned_ids
+            offline_assigned = [o for o in all_assigned if o.status == "offline" or o.id not in effective_ids]
+
+            if not effective_observers:
+                full_results = []
+                for obs in all_assigned:
+                    full_results.append({
+                        "observer_id": obs.id,
+                        "observer_name": obs.name,
+                        "observer_region": obs.region,
+                        "observer_status": "offline",
+                        "success": False,
+                        "latency_ms": None,
+                        "error_message": "Observer offline - no available observers to transfer task",
+                        "round_id": round_id,
+                        "is_transferred": False,
+                    })
                 return {
                     "success": False,
                     "latency_ms": 0,
                     "error_message": "No available observation points",
                     "timestamp": datetime.utcnow(),
                     "round_id": round_id,
-                    "observer_results": [],
+                    "observer_results": full_results,
                     "unified_status": "unknown",
                     "failure_count": 0,
                     "success_count": 0,
                     "offline_count": len(all_assigned),
+                    "online_count": 0,
                 }
 
+            transferred_observers = [o for o in effective_observers if o.id in transferred_ids]
+            original_online = [o for o in effective_observers if o.id in assigned_ids]
+
             tasks = []
-            for observer in observers:
+            task_observer_map = []
+            for observer in original_online:
                 tasks.append(self._probe_from_observer(target, observer, round_id))
+                task_observer_map.append((observer, False))
+            for observer in transferred_observers:
+                tasks.append(self._probe_from_observer(target, observer, round_id))
+                task_observer_map.append((observer, True))
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            observer_results = []
+            executed_results = []
             for i, res in enumerate(results):
+                observer, is_transferred = task_observer_map[i]
                 if isinstance(res, Exception):
-                    observer_results.append({
-                        "observer_id": observers[i].id,
-                        "observer_name": observers[i].name,
-                        "observer_region": observers[i].region,
+                    executed_results.append({
+                        "observer_id": observer.id,
+                        "observer_name": observer.name,
+                        "observer_region": observer.region,
+                        "observer_status": "online",
                         "success": False,
                         "latency_ms": None,
                         "error_message": str(res),
                         "round_id": round_id,
+                        "is_transferred": is_transferred,
                     })
                 else:
-                    observer_results.append(res)
+                    res["observer_status"] = "online"
+                    res["is_transferred"] = is_transferred
+                    executed_results.append(res)
 
-            for orr in observer_results:
+            full_results = []
+            executed_by_id = {r["observer_id"]: r for r in executed_results}
+
+            for obs in all_assigned:
+                if obs.id in executed_by_id:
+                    r = executed_by_id[obs.id]
+                    full_results.append(r)
+                else:
+                    full_results.append({
+                        "observer_id": obs.id,
+                        "observer_name": obs.name,
+                        "observer_region": obs.region,
+                        "observer_status": "offline",
+                        "success": False,
+                        "latency_ms": None,
+                        "error_message": "Observer offline - task transferred",
+                        "round_id": round_id,
+                        "is_transferred": False,
+                    })
+
+            for r in executed_results:
+                if r.get("is_transferred"):
+                    full_results.append(r)
+
+            for orr in full_results:
                 db_result = ObserverProbeResult(
                     target_id=target.id,
                     observer_id=orr["observer_id"],
@@ -204,29 +282,33 @@ class ObserverEngine:
                 )
                 db.add(db_result)
 
-            online_count = len(observer_results)
-            success_count = sum(1 for r in observer_results if r["success"])
+            online_results = [r for r in full_results if r.get("observer_status") == "online"]
+            online_count = len(online_results)
+            success_count = sum(1 for r in online_results if r["success"])
             failure_count = online_count - success_count
-            offline_count = max(0, len(all_assigned) - online_count)
+            offline_count = len([r for r in full_results if r.get("observer_status") == "offline"])
 
             unified_status = self._calculate_unified_status(
                 success_count, failure_count, online_count
             )
 
             avg_latency = None
-            latencies = [r["latency_ms"] for r in observer_results if r["success"] and r["latency_ms"] is not None]
+            latencies = [r["latency_ms"] for r in online_results if r["success"] and r["latency_ms"] is not None]
             if latencies:
                 avg_latency = sum(latencies) / len(latencies)
 
             db.commit()
 
             error_msg = None
-            if unified_status in ("degraded", "down"):
+            if unified_status in ("degraded", "down", "partial"):
                 failed_regions = [
                     f"{r['observer_region']}({r['observer_name']})"
-                    for r in observer_results if not r["success"]
+                    for r in online_results if not r["success"]
                 ]
-                error_msg = f"Failed from: {', '.join(failed_regions)}"
+                if failed_regions:
+                    error_msg = f"Failed from: {', '.join(failed_regions)}"
+                else:
+                    error_msg = "Some observers offline"
 
             return {
                 "success": unified_status != "down",
@@ -234,7 +316,7 @@ class ObserverEngine:
                 "error_message": error_msg,
                 "timestamp": datetime.utcnow(),
                 "round_id": round_id,
-                "observer_results": observer_results,
+                "observer_results": full_results,
                 "unified_status": unified_status,
                 "success_count": success_count,
                 "failure_count": failure_count,
