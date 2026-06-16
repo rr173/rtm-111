@@ -106,7 +106,7 @@ def _enrich_target(target: ProbeTarget, db: Session = None) -> dict:
         "silent_end": strategy["silent_end"],
         "source_id": target.source_id,
         "source_name": source_name,
-        "deprecated": target.deprecated,
+        "deprecated": target.deprecated or False,
         "deprecated_at": target.deprecated_at,
         "last_seen_at": target.last_seen_at,
         "current_interval": current_interval,
@@ -723,6 +723,9 @@ def _migrate_database():
                 if col_name not in columns:
                     conn.execute(text(f"ALTER TABLE probe_targets ADD COLUMN {col_name} {col_def}"))
                     print(f"Added column {col_name} to probe_targets")
+
+            conn.execute(text("UPDATE probe_targets SET deprecated = 0 WHERE deprecated IS NULL"))
+            conn.execute(text("UPDATE probe_targets SET source_id = NULL WHERE source_id IS NOT NULL AND source_id NOT IN (SELECT id FROM registry_sources)"))
 
             conn.commit()
         except Exception as e:

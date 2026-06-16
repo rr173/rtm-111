@@ -1,5 +1,6 @@
 import asyncio
 import httpx
+import threading
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from sqlalchemy.orm import Session
@@ -17,6 +18,7 @@ class SyncEngine:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._sync_tasks: Dict[int, asyncio.Task] = {}
         self._sync_callback = None
+        self._lock = threading.Lock()
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
@@ -31,7 +33,7 @@ class SyncEngine:
         try:
             sources = db.query(RegistrySource).filter(RegistrySource.enabled == True).all()
             for source in sources:
-                self._schedule_source(source.id)
+                await self._add_source_async(source.id)
         finally:
             db.close()
 
@@ -42,52 +44,103 @@ class SyncEngine:
         self._sync_tasks.clear()
 
     def add_source(self, source_id: int):
-        if source_id not in self._sync_tasks:
-            self._schedule_source(source_id)
+        with self._lock:
+            if source_id in self._sync_tasks:
+                return
+        if self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._add_source_async(source_id), self._loop
+            )
+
+    async def _add_source_async(self, source_id: int):
+        with self._lock:
+            if source_id in self._sync_tasks or not self.running:
+                return
+            task = asyncio.create_task(self._run_source_loop(source_id))
+            self._sync_tasks[source_id] = task
 
     def remove_source(self, source_id: int):
-        if source_id in self._sync_tasks:
-            task = self._sync_tasks[source_id]
+        task = None
+        with self._lock:
+            if source_id in self._sync_tasks:
+                task = self._sync_tasks.pop(source_id)
+        if task:
+            task.cancel()
             if self._loop and self._loop.is_running():
-                self._loop.call_soon_threadsafe(task.cancel)
-            del self._sync_tasks[source_id]
+                self._loop.call_soon_threadsafe(
+                    lambda: None if task.done() else task.cancel()
+                )
 
     def update_source(self, source_id: int):
-        self.remove_source(source_id)
         db = SessionLocal()
         try:
             source = db.query(RegistrySource).filter(RegistrySource.id == source_id).first()
-            if source and source.enabled:
+            if not source:
+                return
+
+            was_enabled = source_id in self._sync_tasks
+            should_be_enabled = source.enabled
+
+            if not was_enabled and should_be_enabled:
+                self.add_source(source_id)
+            elif was_enabled and not should_be_enabled:
+                self.remove_source(source_id)
+                self._pause_source_targets(source_id)
+            elif was_enabled and should_be_enabled:
+                self.remove_source(source_id)
                 self.add_source(source_id)
         finally:
             db.close()
 
-    def _schedule_source(self, source_id: int):
-        if self._loop is None:
-            return
-        if self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(
-                self._run_source_loop(source_id), self._loop
-            )
+    def _pause_source_targets(self, source_id: int):
+        db = SessionLocal()
+        try:
+            targets = db.query(ProbeTarget).filter(
+                ProbeTarget.source_id == source_id,
+                ProbeTarget.deprecated == False
+            ).all()
+            for target in targets:
+                target.paused = True
+                try:
+                    probe_engine.toggle_target(target.id, True)
+                except Exception:
+                    pass
+            db.commit()
+        except Exception as e:
+            print(f"Error pausing targets for source {source_id}: {e}")
+        finally:
+            db.close()
 
     async def _run_source_loop(self, source_id: int):
-        await asyncio.sleep(5)
-        while self.running:
-            db = SessionLocal()
-            try:
-                source = db.query(RegistrySource).filter(RegistrySource.id == source_id).first()
-                if not source or not source.enabled:
-                    break
-                interval = source.pull_interval
-            finally:
-                db.close()
+        try:
+            await asyncio.sleep(5)
+            while self.running:
+                db = SessionLocal()
+                interval = 60
+                try:
+                    source = db.query(RegistrySource).filter(RegistrySource.id == source_id).first()
+                    if not source or not source.enabled:
+                        break
+                    interval = source.pull_interval
+                except Exception as e:
+                    print(f"Error checking source {source_id}: {e}")
+                finally:
+                    db.close()
 
-            try:
-                await self.sync_source(source_id, triggered_by="auto")
-            except Exception as e:
-                print(f"Auto sync error for source {source_id}: {e}")
+                try:
+                    await self.sync_source(source_id, triggered_by="auto")
+                except Exception as e:
+                    print(f"Auto sync error for source {source_id}: {e}")
 
-            await asyncio.sleep(interval)
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"Source loop error for {source_id}: {e}")
+        finally:
+            with self._lock:
+                if source_id in self._sync_tasks:
+                    self._sync_tasks.pop(source_id, None)
 
     async def sync_source(self, source_id: int, triggered_by: str = "manual") -> dict:
         db = SessionLocal()
@@ -125,11 +178,14 @@ class SyncEngine:
                 db.commit()
 
                 if self._sync_callback:
-                    self._sync_callback({
-                        "source_id": source_id,
-                        "event_id": sync_event.id,
-                        "result": result,
-                    })
+                    try:
+                        self._sync_callback({
+                            "source_id": source_id,
+                            "event_id": sync_event.id,
+                            "result": result,
+                        })
+                    except Exception:
+                        pass
 
                 return result
             except Exception as e:
@@ -141,11 +197,14 @@ class SyncEngine:
                 db.commit()
 
                 if self._sync_callback:
-                    self._sync_callback({
-                        "source_id": source_id,
-                        "event_id": sync_event.id,
-                        "error": str(e),
-                    })
+                    try:
+                        self._sync_callback({
+                            "source_id": source_id,
+                            "event_id": sync_event.id,
+                            "error": str(e),
+                        })
+                    except Exception:
+                        pass
 
                 return {"error": str(e)}
         finally:
@@ -207,7 +266,6 @@ class SyncEngine:
             discovered.append(svc)
 
         discovered_addresses = {s["address"] for s in discovered}
-        discovered_by_address = {s["address"]: s for s in discovered}
 
         existing_targets = db.query(ProbeTarget).filter(
             ProbeTarget.source_id == source.id
@@ -222,7 +280,10 @@ class SyncEngine:
                     existing.deprecated = False
                     existing.deprecated_at = None
                     existing.paused = False
-                    probe_engine.add_target(existing.id)
+                    try:
+                        probe_engine.add_target(existing.id)
+                    except Exception:
+                        pass
 
                     db.add(SyncEventDetail(
                         event_id=sync_event.id,
@@ -253,7 +314,10 @@ class SyncEngine:
                 db.add(target)
                 db.flush()
 
-                probe_engine.add_target(target.id)
+                try:
+                    probe_engine.add_target(target.id)
+                except Exception:
+                    pass
 
                 db.add(SyncEventDetail(
                     event_id=sync_event.id,
@@ -272,7 +336,10 @@ class SyncEngine:
                     target.deprecated = True
                     target.deprecated_at = now
                     target.paused = True
-                    probe_engine.toggle_target(target.id, True)
+                    try:
+                        probe_engine.toggle_target(target.id, True)
+                    except Exception:
+                        pass
 
                     db.add(SyncEventDetail(
                         event_id=sync_event.id,
@@ -305,13 +372,19 @@ class SyncEngine:
             if not target:
                 return {"error": "Target not found"}
 
+            if not target.deprecated:
+                return {"error": "Target is not deprecated"}
+
             target.deprecated = False
             target.deprecated_at = None
             target.paused = False
             target.last_seen_at = datetime.utcnow()
             db.commit()
 
-            probe_engine.toggle_target(target.id, False)
+            try:
+                probe_engine.toggle_target(target.id, False)
+            except Exception:
+                pass
 
             return {"message": "Target restored", "target_id": target_id}
         finally:
