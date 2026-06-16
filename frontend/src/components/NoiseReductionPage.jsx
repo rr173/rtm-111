@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { 
   processAlerts, 
   generateHourlyStats,
@@ -15,6 +15,31 @@ import NoiseReductionDashboard from './NoiseReductionDashboard';
 import AlertGroupList from './AlertGroupList';
 import NoiseReductionRules from './NoiseReductionRules';
 
+const LS_MERGE_RULES = 'nr_merge_rules';
+const LS_SUPPRESSION_RULES = 'nr_suppression_rules';
+
+function loadMergeRules() {
+  try {
+    const saved = localStorage.getItem(LS_MERGE_RULES);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (_) {}
+  return DEFAULT_MERGE_RULES;
+}
+
+function loadSuppressionRules() {
+  try {
+    const saved = localStorage.getItem(LS_SUPPRESSION_RULES);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (_) {}
+  return DEFAULT_SUPPRESSION_RULES;
+}
+
 function NoiseReductionPage({ realAlerts, realTargets, realDependencies, realGroups }) {
   const [activeView, setActiveView] = useState('dashboard');
   
@@ -30,9 +55,43 @@ function NoiseReductionPage({ realAlerts, realTargets, realDependencies, realGro
   const groupsInfo = useDemo ? demoGroups : realGroups;
   const rawAlerts = useDemo ? demoAlerts : realAlerts;
 
-  const [mergeRules, setMergeRules] = useState(DEFAULT_MERGE_RULES);
-  const [suppressionRules, setSuppressionRules] = useState(DEFAULT_SUPPRESSION_RULES);
+  const [mergeRules, setMergeRulesState] = useState(loadMergeRules);
+  const [suppressionRules, setSuppressionRulesState] = useState(loadSuppressionRules);
   const [alertGroups, setAlertGroups] = useState([]);
+  const [rulesVersion, setRulesVersion] = useState(0);
+
+  const setMergeRules = (next) => {
+    const nextArr = Array.isArray(next) ? next : [...next];
+    setMergeRulesState(nextArr);
+    setRulesVersion(v => v + 1);
+    try { localStorage.setItem(LS_MERGE_RULES, JSON.stringify(nextArr)); } catch (_) {}
+  };
+
+  const setSuppressionRules = (next) => {
+    const nextArr = Array.isArray(next) ? next : [...next];
+    setSuppressionRulesState(nextArr);
+    setRulesVersion(v => v + 1);
+    try { localStorage.setItem(LS_SUPPRESSION_RULES, JSON.stringify(nextArr)); } catch (_) {}
+  };
+
+  useEffect(() => {
+    const onStorage = (e) => {
+      if (e.key === LS_MERGE_RULES) {
+        try { 
+          setMergeRulesState(JSON.parse(e.newValue)); 
+          setRulesVersion(v => v + 1);
+        } catch (_) {}
+      }
+      if (e.key === LS_SUPPRESSION_RULES) {
+        try { 
+          setSuppressionRulesState(JSON.parse(e.newValue)); 
+          setRulesVersion(v => v + 1);
+        } catch (_) {}
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   const processedData = useMemo(() => {
     const result = processAlerts(rawAlerts, {
@@ -42,7 +101,7 @@ function NoiseReductionPage({ realAlerts, realTargets, realDependencies, realGro
       dependencies
     });
     return result;
-  }, [rawAlerts, mergeRules, suppressionRules, targets, dependencies]);
+  }, [rawAlerts, mergeRules, suppressionRules, targets, dependencies, rulesVersion]);
 
   const groupsWithAck = useMemo(() => {
     return processedData.groups.map(g => ({
