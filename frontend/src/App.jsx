@@ -13,6 +13,7 @@ import ChangeGuardianPanel from './components/ChangeGuardianPanel';
 import SLOBudgetPanel from './components/SLOBudgetPanel';
 import CommandRoom from './components/CommandRoom';
 import NoiseReductionPage from './components/NoiseReductionPage';
+import AutoDiscoveryPanel from './components/AutoDiscoveryPanel';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
@@ -251,6 +252,12 @@ function App() {
             🔕 智能降噪
           </button>
           <button
+            className={`tab-btn ${activeTab === 'discovery' ? 'active' : ''}`}
+            onClick={() => setActiveTab('discovery')}
+          >
+            🔍 自动发现
+          </button>
+          <button
             className={`tab-btn`}
             onClick={() => setShowRuleEditor(true)}
           >
@@ -324,12 +331,14 @@ function App() {
               realDependencies={dependencies}
               realGroups={groups}
             />
+          ) : activeTab === 'discovery' ? (
+            <AutoDiscoveryPanel targets={targets} groups={groups} />
           ) : (
             <SnapshotList />
           )}
         </div>
 
-        {activeTab !== 'slo' && activeTab !== 'command' && activeTab !== 'noise' && (
+        {activeTab !== 'slo' && activeTab !== 'command' && activeTab !== 'noise' && activeTab !== 'discovery' && (
           <div className="right-panel">
             <AlertPanel
               alerts={alerts}

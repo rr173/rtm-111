@@ -119,6 +119,11 @@ class ProbeTargetResponse(BaseModel):
     fast_interval: int
     silent_start: Optional[str] = None
     silent_end: Optional[str] = None
+    source_id: Optional[int] = None
+    source_name: Optional[str] = None
+    deprecated: bool
+    deprecated_at: Optional[datetime] = None
+    last_seen_at: Optional[datetime] = None
     current_interval: Optional[int] = None
     next_probe_at: Optional[datetime] = None
     in_silent_window: Optional[bool] = None
@@ -976,3 +981,92 @@ class IncidentListResponse(BaseModel):
     active_count: int = 0
     review_count: int = 0
     resolved_count: int = 0
+
+
+class RegistrySourceCreate(BaseModel):
+    name: str
+    url: str
+    pull_interval: int = Field(60, ge=10, le=3600)
+    default_group_id: Optional[int] = None
+    default_type: str = "http"
+    default_interval: int = Field(30, ge=5, le=300)
+    default_timeout: int = Field(5, ge=1, le=60)
+    deprecate_after_hours: int = Field(24, ge=1, le=720)
+    enabled: Optional[bool] = True
+    headers: Optional[Dict[str, str]] = None
+
+
+class RegistrySourceUpdate(BaseModel):
+    name: Optional[str] = None
+    url: Optional[str] = None
+    pull_interval: Optional[int] = Field(None, ge=10, le=3600)
+    default_group_id: Optional[int] = None
+    default_type: Optional[str] = None
+    default_interval: Optional[int] = Field(None, ge=5, le=300)
+    default_timeout: Optional[int] = Field(None, ge=1, le=60)
+    deprecate_after_hours: Optional[int] = Field(None, ge=1, le=720)
+    enabled: Optional[bool] = None
+    headers: Optional[Dict[str, str]] = None
+
+
+class RegistrySourceResponse(BaseModel):
+    id: int
+    name: str
+    url: str
+    pull_interval: int
+    default_group_id: Optional[int] = None
+    default_group_name: Optional[str] = None
+    default_type: str
+    default_interval: int
+    default_timeout: int
+    deprecate_after_hours: int
+    enabled: bool
+    last_sync_at: Optional[datetime] = None
+    last_sync_status: Optional[str] = None
+    headers: Optional[Dict[str, str]] = None
+    target_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SyncEventDetailResponse(BaseModel):
+    id: int
+    target_id: Optional[int] = None
+    target_name: Optional[str] = None
+    service_name: str
+    service_address: str
+    action: str
+    detail: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SyncEventResponse(BaseModel):
+    id: int
+    source_id: int
+    source_name: Optional[str] = None
+    triggered_by: str
+    status: str
+    started_at: datetime
+    finished_at: Optional[datetime] = None
+    discovered_count: int
+    new_count: int
+    deprecated_count: int
+    failed_count: int
+    unchanged_count: int
+    error_message: Optional[str] = None
+    raw_service_count: int
+    details: List[SyncEventDetailResponse] = []
+
+    class Config:
+        from_attributes = True
+
+
+class SyncEventListResponse(BaseModel):
+    items: List[SyncEventResponse] = []
+    total: int = 0

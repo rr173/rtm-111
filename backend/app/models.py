@@ -175,6 +175,10 @@ class ProbeTarget(Base):
     fast_interval = Column(Integer, nullable=True)
     silent_start = Column(String(5), nullable=True)
     silent_end = Column(String(5), nullable=True)
+    source_id = Column(Integer, ForeignKey("registry_sources.id"), nullable=True, index=True)
+    deprecated = Column(Boolean, default=False)
+    deprecated_at = Column(DateTime, nullable=True)
+    last_seen_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -462,10 +466,70 @@ class IncidentNote(Base):
     __tablename__ = "incident_notes"
 
     id = Column(Integer, primary_key=True, index=True)
-    incident_id = Column(Integer, ForeignKey("incidents.id"), nullable=False, index=True)
+    incident_id = Column(Integer, ForeignKey("incidents.id"), nullable=False)
     author = Column(String(100), nullable=False)
     content = Column(Text, nullable=False)
     action_type = Column(String(30), default="note")
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
     incident = relationship("Incident", back_populates="notes")
+
+
+class RegistrySource(Base):
+    __tablename__ = "registry_sources"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    url = Column(String(1024), nullable=False)
+    pull_interval = Column(Integer, nullable=False, default=60)
+    default_group_id = Column(Integer, ForeignKey("probe_groups.id"), nullable=True)
+    default_type = Column(String(10), nullable=False, default="http")
+    default_interval = Column(Integer, nullable=False, default=30)
+    default_timeout = Column(Integer, nullable=False, default=5)
+    deprecate_after_hours = Column(Integer, nullable=False, default=24)
+    enabled = Column(Boolean, default=True)
+    last_sync_at = Column(DateTime, nullable=True)
+    last_sync_status = Column(String(20), nullable=True)
+    headers = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    default_group = relationship("ProbeGroup")
+    sync_events = relationship("SyncEvent", back_populates="source", cascade="all, delete-orphan")
+
+
+class SyncEvent(Base):
+    __tablename__ = "sync_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source_id = Column(Integer, ForeignKey("registry_sources.id"), nullable=False, index=True)
+    triggered_by = Column(String(20), nullable=False, default="auto")
+    status = Column(String(20), nullable=False, default="running")
+    started_at = Column(DateTime, default=datetime.utcnow, index=True)
+    finished_at = Column(DateTime, nullable=True)
+    discovered_count = Column(Integer, default=0)
+    new_count = Column(Integer, default=0)
+    deprecated_count = Column(Integer, default=0)
+    failed_count = Column(Integer, default=0)
+    unchanged_count = Column(Integer, default=0)
+    error_message = Column(Text, nullable=True)
+    raw_service_count = Column(Integer, default=0)
+
+    source = relationship("RegistrySource", back_populates="sync_events")
+    details = relationship("SyncEventDetail", back_populates="event", cascade="all, delete-orphan")
+
+
+class SyncEventDetail(Base):
+    __tablename__ = "sync_event_details"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, ForeignKey("sync_events.id"), nullable=False, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=True, index=True)
+    service_name = Column(String(255), nullable=False)
+    service_address = Column(String(512), nullable=False)
+    action = Column(String(20), nullable=False)
+    detail = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    event = relationship("SyncEvent", back_populates="details")
+    target = relationship("ProbeTarget")

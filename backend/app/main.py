@@ -15,6 +15,7 @@ from .models import (
     Change, ChangeTarget, ChangeEvent,
     SLOTarget, SLOBudgetSnapshot,
     Incident, IncidentTarget, IncidentAlert, IncidentTimeline, IncidentNote,
+    RegistrySource, SyncEvent, SyncEventDetail,
 )
 from .schemas import (
     ProbeTargetCreate, ProbeTargetUpdate, ProbeTargetResponse,
@@ -42,9 +43,12 @@ from .schemas import (
     IncidentTargetInfo, IncidentAlertInfo, IncidentTimelineEvent,
     IncidentNoteInfo, IncidentDependencyInfo, IncidentRegionDivergence,
     IncidentSLOBudgetRisk,
+    RegistrySourceCreate, RegistrySourceUpdate, RegistrySourceResponse,
+    SyncEventDetailResponse, SyncEventResponse, SyncEventListResponse,
 )
 from .observer_engine import observer_engine
 from .probe_engine import probe_engine
+from .sync_engine import sync_engine
 from .websocket_manager import manager, get_target_history
 
 
@@ -65,6 +69,12 @@ def _enrich_target(target: ProbeTarget, db: Session = None) -> dict:
     rule_name = None
     if target.rule_id and target.rule:
         rule_name = target.rule.name
+
+    source_name = None
+    if target.source_id:
+        rs = db.query(RegistrySource).filter(RegistrySource.id == target.source_id).first() if db else None
+        if rs:
+            source_name = rs.name
 
     return {
         "id": target.id,
@@ -94,6 +104,11 @@ def _enrich_target(target: ProbeTarget, db: Session = None) -> dict:
         "fast_interval": strategy["fast_interval"],
         "silent_start": strategy["silent_start"],
         "silent_end": strategy["silent_end"],
+        "source_id": target.source_id,
+        "source_name": source_name,
+        "deprecated": target.deprecated,
+        "deprecated_at": target.deprecated_at,
+        "last_seen_at": target.last_seen_at,
         "current_interval": current_interval,
         "next_probe_at": next_probe_at,
         "in_silent_window": in_silent,
@@ -617,6 +632,98 @@ def _migrate_database():
                             conn.execute(text(idx_sql))
                     print(f"Created table {table_name}")
 
+            discovery_tables = {
+                "registry_sources": """
+                    CREATE TABLE registry_sources (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name VARCHAR(255) NOT NULL,
+                        url VARCHAR(1024) NOT NULL,
+                        pull_interval INTEGER NOT NULL DEFAULT 60,
+                        default_group_id INTEGER,
+                        default_type VARCHAR(10) NOT NULL DEFAULT 'http',
+                        default_interval INTEGER NOT NULL DEFAULT 30,
+                        default_timeout INTEGER NOT NULL DEFAULT 5,
+                        deprecate_after_hours INTEGER NOT NULL DEFAULT 24,
+                        enabled INTEGER DEFAULT 1,
+                        last_sync_at DATETIME,
+                        last_sync_status VARCHAR(20),
+                        headers TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (default_group_id) REFERENCES probe_groups(id) ON DELETE SET NULL
+                    )
+                """,
+                "sync_events": """
+                    CREATE TABLE sync_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        source_id INTEGER NOT NULL,
+                        triggered_by VARCHAR(20) NOT NULL DEFAULT 'auto',
+                        status VARCHAR(20) NOT NULL DEFAULT 'running',
+                        started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        finished_at DATETIME,
+                        discovered_count INTEGER DEFAULT 0,
+                        new_count INTEGER DEFAULT 0,
+                        deprecated_count INTEGER DEFAULT 0,
+                        failed_count INTEGER DEFAULT 0,
+                        unchanged_count INTEGER DEFAULT 0,
+                        error_message TEXT,
+                        raw_service_count INTEGER DEFAULT 0,
+                        FOREIGN KEY (source_id) REFERENCES registry_sources(id) ON DELETE CASCADE
+                    )
+                """,
+                "sync_event_details": """
+                    CREATE TABLE sync_event_details (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        event_id INTEGER NOT NULL,
+                        target_id INTEGER,
+                        service_name VARCHAR(255) NOT NULL,
+                        service_address VARCHAR(512) NOT NULL,
+                        action VARCHAR(20) NOT NULL,
+                        detail TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (event_id) REFERENCES sync_events(id) ON DELETE CASCADE,
+                        FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE SET NULL
+                    )
+                """,
+            }
+
+            for table_name, create_sql in discovery_tables.items():
+                result = conn.execute(text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"))
+                if not result.fetchone():
+                    conn.execute(text(create_sql))
+                    index_sqls = {
+                        "registry_sources": [
+                            "CREATE INDEX idx_rs_default_group_id ON registry_sources(default_group_id)",
+                        ],
+                        "sync_events": [
+                            "CREATE INDEX idx_se_source_id ON sync_events(source_id)",
+                            "CREATE INDEX idx_se_started_at ON sync_events(started_at)",
+                            "CREATE INDEX idx_se_status ON sync_events(status)",
+                        ],
+                        "sync_event_details": [
+                            "CREATE INDEX idx_sed_event_id ON sync_event_details(event_id)",
+                            "CREATE INDEX idx_sed_target_id ON sync_event_details(target_id)",
+                            "CREATE INDEX idx_sed_action ON sync_event_details(action)",
+                        ],
+                    }
+                    if table_name in index_sqls:
+                        for idx_sql in index_sqls[table_name]:
+                            conn.execute(text(idx_sql))
+                    print(f"Created table {table_name}")
+
+            result = conn.execute(text("PRAGMA table_info(probe_targets)"))
+            columns = [row[1] for row in result.fetchall()]
+            discovery_target_columns = [
+                ("source_id", "INTEGER"),
+                ("deprecated", "INTEGER DEFAULT 0"),
+                ("deprecated_at", "DATETIME"),
+                ("last_seen_at", "DATETIME"),
+            ]
+            for col_name, col_def in discovery_target_columns:
+                if col_name not in columns:
+                    conn.execute(text(f"ALTER TABLE probe_targets ADD COLUMN {col_name} {col_def}"))
+                    print(f"Added column {col_name} to probe_targets")
+
             conn.commit()
         except Exception as e:
             print(f"Migration error: {e}")
@@ -666,12 +773,14 @@ async def startup_event():
     incident_engine.attach_callbacks()
     await observer_engine.start()
     await probe_engine.start()
+    await sync_engine.start()
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     await observer_engine.stop()
     await probe_engine.stop()
+    await sync_engine.stop()
 
 
 def _init_demo_slo():
@@ -5163,4 +5272,197 @@ def resolve_incident(incident_id: int, payload: IncidentResolve, db: Session = D
 
     manager.broadcast_incidents_update()
     return _incident_to_response(incident, db, include_details=True)
+
+
+def _source_to_response(source: RegistrySource, db: Session) -> dict:
+    group_name = None
+    if source.default_group_id:
+        group = db.query(ProbeGroup).filter(ProbeGroup.id == source.default_group_id).first()
+        if group:
+            group_name = group.name
+
+    target_count = db.query(ProbeTarget).filter(ProbeTarget.source_id == source.id).count()
+
+    return {
+        "id": source.id,
+        "name": source.name,
+        "url": source.url,
+        "pull_interval": source.pull_interval,
+        "default_group_id": source.default_group_id,
+        "default_group_name": group_name,
+        "default_type": source.default_type,
+        "default_interval": source.default_interval,
+        "default_timeout": source.default_timeout,
+        "deprecate_after_hours": source.deprecate_after_hours,
+        "enabled": source.enabled,
+        "last_sync_at": source.last_sync_at,
+        "last_sync_status": source.last_sync_status,
+        "headers": source.headers,
+        "target_count": target_count,
+        "created_at": source.created_at,
+        "updated_at": source.updated_at,
+    }
+
+
+def _sync_event_to_response(event: SyncEvent, db: Session, include_details: bool = False) -> dict:
+    source_name = None
+    if event.source:
+        source_name = event.source.name
+    else:
+        src = db.query(RegistrySource).filter(RegistrySource.id == event.source_id).first()
+        if src:
+            source_name = src.name
+
+    details = []
+    if include_details:
+        for d in event.details:
+            target_name = None
+            if d.target_id:
+                t = db.query(ProbeTarget).filter(ProbeTarget.id == d.target_id).first()
+                if t:
+                    target_name = t.name
+            details.append({
+                "id": d.id,
+                "target_id": d.target_id,
+                "target_name": target_name,
+                "service_name": d.service_name,
+                "service_address": d.service_address,
+                "action": d.action,
+                "detail": d.detail,
+                "created_at": d.created_at,
+            })
+
+    return {
+        "id": event.id,
+        "source_id": event.source_id,
+        "source_name": source_name,
+        "triggered_by": event.triggered_by,
+        "status": event.status,
+        "started_at": event.started_at,
+        "finished_at": event.finished_at,
+        "discovered_count": event.discovered_count,
+        "new_count": event.new_count,
+        "deprecated_count": event.deprecated_count,
+        "failed_count": event.failed_count,
+        "unchanged_count": event.unchanged_count,
+        "error_message": event.error_message,
+        "raw_service_count": event.raw_service_count,
+        "details": details,
+    }
+
+
+@app.get("/api/registry-sources", response_model=List[RegistrySourceResponse])
+def list_registry_sources(db: Session = Depends(get_db)):
+    sources = db.query(RegistrySource).all()
+    return [_source_to_response(s, db) for s in sources]
+
+
+@app.get("/api/registry-sources/{source_id}", response_model=RegistrySourceResponse)
+def get_registry_source(source_id: int, db: Session = Depends(get_db)):
+    source = db.query(RegistrySource).filter(RegistrySource.id == source_id).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="Registry source not found")
+    return _source_to_response(source, db)
+
+
+@app.post("/api/registry-sources", response_model=RegistrySourceResponse)
+def create_registry_source(source_data: RegistrySourceCreate, db: Session = Depends(get_db)):
+    source = RegistrySource(**source_data.model_dump())
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+    sync_engine.add_source(source.id)
+    return _source_to_response(source, db)
+
+
+@app.put("/api/registry-sources/{source_id}", response_model=RegistrySourceResponse)
+def update_registry_source(source_id: int, source_update: RegistrySourceUpdate, db: Session = Depends(get_db)):
+    source = db.query(RegistrySource).filter(RegistrySource.id == source_id).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="Registry source not found")
+
+    update_data = source_update.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(source, key, value)
+
+    db.commit()
+    db.refresh(source)
+    sync_engine.update_source(source.id)
+    return _source_to_response(source, db)
+
+
+@app.delete("/api/registry-sources/{source_id}")
+def delete_registry_source(source_id: int, db: Session = Depends(get_db)):
+    source = db.query(RegistrySource).filter(RegistrySource.id == source_id).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="Registry source not found")
+
+    sync_engine.remove_source(source_id)
+    db.delete(source)
+    db.commit()
+    return {"message": "Registry source deleted"}
+
+
+@app.post("/api/registry-sources/{source_id}/sync")
+async def trigger_sync(source_id: int):
+    result = await sync_engine.sync_source(source_id, triggered_by="manual")
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return result
+
+
+@app.get("/api/registry-sources/{source_id}/sync-events", response_model=SyncEventListResponse)
+def list_sync_events(source_id: int, limit: int = 20, offset: int = 0, db: Session = Depends(get_db)):
+    source = db.query(RegistrySource).filter(RegistrySource.id == source_id).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="Registry source not found")
+
+    total = db.query(SyncEvent).filter(SyncEvent.source_id == source_id).count()
+    events = db.query(SyncEvent).filter(
+        SyncEvent.source_id == source_id
+    ).order_by(SyncEvent.started_at.desc()).offset(offset).limit(limit).all()
+
+    return {
+        "items": [_sync_event_to_response(e, db, include_details=False) for e in events],
+        "total": total,
+    }
+
+
+@app.get("/api/sync-events/{event_id}", response_model=SyncEventResponse)
+def get_sync_event(event_id: int, db: Session = Depends(get_db)):
+    event = db.query(SyncEvent).filter(SyncEvent.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Sync event not found")
+    return _sync_event_to_response(event, db, include_details=True)
+
+
+@app.get("/api/sync-events", response_model=SyncEventListResponse)
+def list_all_sync_events(limit: int = 20, offset: int = 0, db: Session = Depends(get_db)):
+    total = db.query(SyncEvent).count()
+    events = db.query(SyncEvent).order_by(
+        SyncEvent.started_at.desc()
+    ).offset(offset).limit(limit).all()
+
+    return {
+        "items": [_sync_event_to_response(e, db, include_details=False) for e in events],
+        "total": total,
+    }
+
+
+@app.post("/api/targets/{target_id}/restore")
+def restore_target(target_id: int, db: Session = Depends(get_db)):
+    target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    if not target.deprecated:
+        raise HTTPException(status_code=400, detail="Target is not deprecated")
+
+    result = sync_engine.restore_target(target_id)
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    db.expire_all()
+    target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+    return _enrich_target(target, db)
 
