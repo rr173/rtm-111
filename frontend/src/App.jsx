@@ -12,6 +12,7 @@ import ObservationMatrix from './components/ObservationMatrix';
 import ChangeGuardianPanel from './components/ChangeGuardianPanel';
 import SLOBudgetPanel from './components/SLOBudgetPanel';
 import CommandRoom from './components/CommandRoom';
+import NoiseReductionPage from './components/NoiseReductionPage';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
@@ -244,6 +245,12 @@ function App() {
             🚨 指挥室
           </button>
           <button
+            className={`tab-btn ${activeTab === 'noise' ? 'active' : ''}`}
+            onClick={() => setActiveTab('noise')}
+          >
+            🔕 智能降噪
+          </button>
+          <button
             className={`tab-btn`}
             onClick={() => setShowRuleEditor(true)}
           >
@@ -310,12 +317,19 @@ function App() {
               dependencies={dependencies}
               onIncidentUpdate={loadInitialData}
             />
+          ) : activeTab === 'noise' ? (
+            <NoiseReductionPage
+              realAlerts={alerts}
+              realTargets={targets}
+              realDependencies={dependencies}
+              realGroups={groups}
+            />
           ) : (
             <SnapshotList />
           )}
         </div>
 
-        {activeTab !== 'slo' && activeTab !== 'command' && (
+        {activeTab !== 'slo' && activeTab !== 'command' && activeTab !== 'noise' && (
           <div className="right-panel">
             <AlertPanel
               alerts={alerts}
