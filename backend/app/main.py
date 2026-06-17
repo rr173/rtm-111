@@ -50,6 +50,10 @@ from .observer_engine import observer_engine
 from .probe_engine import probe_engine
 from .sync_engine import sync_engine
 from .websocket_manager import manager, get_target_history
+from .recording_engine import recording_engine
+from .playback_engine import playback_engine
+from pydantic import BaseModel
+from typing import List as TypingList
 
 
 def _enrich_target(target: ProbeTarget, db: Session = None) -> dict:
@@ -727,6 +731,80 @@ def _migrate_database():
             conn.execute(text("UPDATE probe_targets SET deprecated = 0 WHERE deprecated IS NULL"))
             conn.execute(text("UPDATE probe_targets SET source_id = NULL WHERE source_id IS NOT NULL AND source_id NOT IN (SELECT id FROM registry_sources)"))
 
+            recording_tables = {
+                "recording_sessions": """
+                    CREATE TABLE recording_sessions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name VARCHAR(255) NOT NULL,
+                        description VARCHAR(1024),
+                        tags TEXT,
+                        status VARCHAR(20) DEFAULT 'recording',
+                        started_at DATETIME NOT NULL,
+                        ended_at DATETIME,
+                        duration_seconds INTEGER DEFAULT 0,
+                        recorded_count INTEGER DEFAULT 0,
+                        target_count INTEGER DEFAULT 0,
+                        filter_target_ids TEXT,
+                        filter_group_ids TEXT,
+                        created_by VARCHAR(100),
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """,
+                "recording_events": """
+                    CREATE TABLE recording_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id INTEGER NOT NULL,
+                        event_type VARCHAR(30) NOT NULL,
+                        target_id INTEGER,
+                        target_name VARCHAR(255),
+                        relative_time_ms INTEGER NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload TEXT NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (session_id) REFERENCES recording_sessions(id) ON DELETE CASCADE
+                    )
+                """,
+                "playback_snapshots": """
+                    CREATE TABLE playback_snapshots (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id INTEGER NOT NULL UNIQUE,
+                        targets_snapshot TEXT NOT NULL,
+                        alerts_snapshot TEXT NOT NULL,
+                        incidents_snapshot TEXT NOT NULL,
+                        groups_snapshot TEXT NOT NULL,
+                        dependencies_snapshot TEXT NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (session_id) REFERENCES recording_sessions(id) ON DELETE CASCADE
+                    )
+                """,
+            }
+
+            for table_name, create_sql in recording_tables.items():
+                result = conn.execute(text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"))
+                if not result.fetchone():
+                    conn.execute(text(create_sql))
+                    index_sqls = {
+                        "recording_sessions": [
+                            "CREATE INDEX idx_recording_sessions_status ON recording_sessions(status)",
+                            "CREATE INDEX idx_recording_sessions_started_at ON recording_sessions(started_at)",
+                            "CREATE INDEX idx_recording_sessions_created_at ON recording_sessions(created_at)",
+                        ],
+                        "recording_events": [
+                            "CREATE INDEX idx_recording_events_session_id ON recording_events(session_id)",
+                            "CREATE INDEX idx_recording_events_event_type ON recording_events(event_type)",
+                            "CREATE INDEX idx_recording_events_target_id ON recording_events(target_id)",
+                            "CREATE INDEX idx_recording_events_relative_time ON recording_events(relative_time_ms)",
+                        ],
+                        "playback_snapshots": [
+                            "CREATE INDEX idx_playback_snapshots_session_id ON playback_snapshots(session_id)",
+                        ],
+                    }
+                    if table_name in index_sqls:
+                        for idx_sql in index_sqls[table_name]:
+                            conn.execute(text(idx_sql))
+                    print(f"Created table {table_name}")
+
             conn.commit()
         except Exception as e:
             print(f"Migration error: {e}")
@@ -754,6 +832,8 @@ async def startup_event():
     probe_engine.set_loop(loop)
     manager.set_loop(loop)
     observer_engine.set_loop(loop)
+    recording_engine.set_loop(loop)
+    playback_engine.set_loop(loop)
 
     if os.getenv("RESET_DEMO_DATA", "false").lower() == "true":
         db_path = "./data/probes.db"
@@ -5468,4 +5548,150 @@ def restore_target(target_id: int, db: Session = Depends(get_db)):
     db.expire_all()
     target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
     return _enrich_target(target, db)
+
+
+class StartRecordingRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+    tags: Optional[TypingList[str]] = None
+    filter_target_ids: Optional[TypingList[int]] = None
+    filter_group_ids: Optional[TypingList[int]] = None
+    created_by: Optional[str] = None
+
+
+class UpdateRecordingRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    tags: Optional[TypingList[str]] = None
+
+
+class StartPlaybackRequest(BaseModel):
+    session_id: int
+    speed: Optional[float] = 1.0
+
+
+class SetSpeedRequest(BaseModel):
+    speed: float
+
+
+class SeekRequest(BaseModel):
+    index: int
+
+
+@app.get("/api/recording/status")
+def get_recording_status():
+    return recording_engine.get_recording_status()
+
+
+@app.post("/api/recording/start")
+def start_recording(req: StartRecordingRequest):
+    result = recording_engine.start_recording(
+        name=req.name,
+        description=req.description,
+        filter_target_ids=req.filter_target_ids,
+        filter_group_ids=req.filter_group_ids,
+        tags=req.tags,
+        created_by=req.created_by,
+    )
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.post("/api/recording/stop")
+def stop_recording():
+    result = recording_engine.stop_recording()
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.get("/api/recording/sessions")
+def list_recording_sessions(skip: int = 0, limit: int = 50):
+    return recording_engine.list_sessions(skip=skip, limit=limit)
+
+
+@app.get("/api/recording/sessions/{session_id}")
+def get_recording_session(session_id: int):
+    result = recording_engine.get_session_detail(session_id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@app.put("/api/recording/sessions/{session_id}")
+def update_recording_session(session_id: int, req: UpdateRecordingRequest):
+    result = recording_engine.update_session(
+        session_id=session_id,
+        name=req.name,
+        description=req.description,
+        tags=req.tags,
+    )
+    if "error" in result:
+        raise HTTPException(status_code=400 if "不存在" not in result["error"] else 404, detail=result["error"])
+    return result
+
+
+@app.delete("/api/recording/sessions/{session_id}")
+def delete_recording_session(session_id: int):
+    result = recording_engine.delete_session(session_id)
+    if "error" in result:
+        raise HTTPException(status_code=400 if "不存在" not in result["error"] else 404, detail=result["error"])
+    return result
+
+
+@app.get("/api/playback/status")
+def get_playback_status():
+    return playback_engine.get_playback_status()
+
+
+@app.post("/api/playback/start")
+def start_playback(req: StartPlaybackRequest):
+    result = playback_engine.start_playback(
+        session_id=req.session_id,
+        speed=req.speed,
+    )
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.post("/api/playback/pause")
+def pause_playback():
+    result = playback_engine.pause_playback()
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.post("/api/playback/resume")
+def resume_playback():
+    result = playback_engine.resume_playback()
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.post("/api/playback/stop")
+def stop_playback(restore: bool = True):
+    result = playback_engine.stop_playback(restore=restore)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.post("/api/playback/speed")
+def set_playback_speed(req: SetSpeedRequest):
+    result = playback_engine.set_speed(req.speed)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.post("/api/playback/seek")
+def playback_seek(req: SeekRequest):
+    result = playback_engine.seek_to(req.index)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 

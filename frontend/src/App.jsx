@@ -14,6 +14,8 @@ import SLOBudgetPanel from './components/SLOBudgetPanel';
 import CommandRoom from './components/CommandRoom';
 import NoiseReductionPage from './components/NoiseReductionPage';
 import AutoDiscoveryPanel from './components/AutoDiscoveryPanel';
+import RecordingControlPanel from './components/RecordingControlPanel';
+import PlaybackControlPanel from './components/PlaybackControlPanel';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
@@ -37,6 +39,10 @@ function App() {
     incidents,
     incidentStats,
     setIncidents,
+    recordingStatus,
+    playbackStatus,
+    playbackFinished,
+    setPlaybackFinished,
   } = useWebSocket();
   const [activeTab, setActiveTab] = useState('list');
   const [expandedTarget, setExpandedTarget] = useState(null);
@@ -258,15 +264,44 @@ function App() {
             🔍 自动发现
           </button>
           <button
+            className={`tab-btn ${activeTab === 'replay' ? 'active' : ''}`}
+            onClick={() => setActiveTab('replay')}
+          >
+            🎬 录制回放
+          </button>
+          <button
             className={`tab-btn`}
             onClick={() => setShowRuleEditor(true)}
           >
             📋 规则管理
           </button>
         </div>
-        <div className="connection-status">
-          <span className={`status-dot ${connected ? 'connected' : 'disconnected'}`}></span>
-          <span>{connected ? '实时连接' : '连接断开'}</span>
+        <div className="header-right">
+          {(recordingStatus?.is_recording || playbackStatus?.is_playing || playbackStatus?.is_paused) && (
+            <div className="global-status-bar">
+              {recordingStatus?.is_recording && (
+                <div className="global-indicator recording" onClick={() => setActiveTab('replay')}>
+                  <span className="rec-dot"></span>
+                  <span>🎬 录制中 {Math.floor(recordingStatus.duration_seconds || 0)}s</span>
+                </div>
+              )}
+              {(playbackStatus?.is_playing || playbackStatus?.is_paused) && (
+                <div
+                  className={`global-indicator playback ${playbackStatus?.is_paused ? 'paused' : ''}`}
+                  onClick={() => setActiveTab('replay')}
+                >
+                  <span className="play-dot"></span>
+                  <span>
+                    {playbackStatus?.is_paused ? '⏸️' : '▶️'} 回放 {playbackStatus.speed}x {(playbackStatus.progress || 0).toFixed(0)}%
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+          <div className="connection-status">
+            <span className={`status-dot ${connected ? 'connected' : 'disconnected'}`}></span>
+            <span>{connected ? '实时连接' : '连接断开'}</span>
+          </div>
         </div>
       </header>
 
@@ -333,19 +368,67 @@ function App() {
             />
           ) : activeTab === 'discovery' ? (
             <AutoDiscoveryPanel targets={targets} groups={groups} />
+          ) : activeTab === 'replay' ? (
+            <div className="replay-page">
+              <div className="replay-panels">
+                <RecordingControlPanel
+                  recordingStatus={recordingStatus}
+                  targets={targets}
+                  groups={groups}
+                />
+                <PlaybackControlPanel
+                  playbackStatus={playbackStatus}
+                  playbackFinished={playbackFinished}
+                  setPlaybackFinished={setPlaybackFinished}
+                  onPlaybackEnd={() => loadInitialData()}
+                />
+              </div>
+              <div className="replay-visualization">
+                <h3 className="replay-section-title">📊 实时状态概览</h3>
+                <StatsBar
+                  healthy={healthyCount}
+                  partial={partialCount}
+                  degraded={degradedCount}
+                  down={downCount}
+                />
+                <TargetList
+                  targets={targets}
+                  groups={groups}
+                  expandedTarget={expandedTarget}
+                  onToggleExpand={setExpandedTarget}
+                  onDelete={deleteTarget}
+                  onTogglePause={togglePause}
+                  onToggleSilence={toggleSilence}
+                  detailData={detailData}
+                  onRefreshGroups={refreshGroups}
+                  onRefreshTargets={refreshTargets}
+                  onTargetGroupChange={handleTargetGroupChange}
+                  targetRoundResultsMap={targetRoundResultsMap || {}}
+                  targetChangesMap={targetChangesMap}
+                  compact={true}
+                />
+              </div>
+            </div>
           ) : (
             <SnapshotList />
           )}
         </div>
 
-        {activeTab !== 'slo' && activeTab !== 'command' && activeTab !== 'noise' && activeTab !== 'discovery' && (
+        {activeTab !== 'slo' && activeTab !== 'command' && activeTab !== 'noise' && activeTab !== 'discovery' && activeTab !== 'replay' ? (
           <div className="right-panel">
             <AlertPanel
               alerts={alerts}
               onAcknowledge={acknowledgeAlert}
             />
           </div>
-        )}
+        ) : activeTab === 'replay' ? (
+          <div className="right-panel replay-right-panel">
+            <AlertPanel
+              alerts={alerts}
+              onAcknowledge={acknowledgeAlert}
+            />
+          </div>
+        ) : null}
       </div>
 
       {activeTab === 'list' && (

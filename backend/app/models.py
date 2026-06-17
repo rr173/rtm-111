@@ -533,3 +533,63 @@ class SyncEventDetail(Base):
 
     event = relationship("SyncEvent", back_populates="details")
     target = relationship("ProbeTarget")
+
+
+class RecordingSession(Base):
+    __tablename__ = "recording_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(String(1024), nullable=True)
+    tags = Column(JSON, default=list)
+    status = Column(String(20), default="recording", index=True)
+    started_at = Column(DateTime, nullable=False, index=True)
+    ended_at = Column(DateTime, nullable=True, index=True)
+    duration_seconds = Column(Integer, default=0)
+    recorded_count = Column(Integer, default=0)
+    target_count = Column(Integer, default=0)
+    filter_target_ids = Column(JSON, nullable=True)
+    filter_group_ids = Column(JSON, nullable=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    events = relationship("RecordingEvent", back_populates="session", cascade="all, delete-orphan")
+    pre_playback_snapshot = relationship(
+        "PlaybackSnapshot",
+        back_populates="session",
+        foreign_keys="PlaybackSnapshot.session_id",
+        uselist=False,
+        cascade="all, delete-orphan"
+    )
+
+
+class RecordingEvent(Base):
+    __tablename__ = "recording_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("recording_sessions.id"), nullable=False, index=True)
+    event_type = Column(String(30), nullable=False, index=True)
+    target_id = Column(Integer, nullable=True, index=True)
+    target_name = Column(String(255), nullable=True)
+    relative_time_ms = Column(Integer, nullable=False, index=True)
+    sequence = Column(Integer, nullable=False)
+    payload = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    session = relationship("RecordingSession", back_populates="events")
+
+
+class PlaybackSnapshot(Base):
+    __tablename__ = "playback_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("recording_sessions.id"), nullable=False, unique=True, index=True)
+    targets_snapshot = Column(JSON, nullable=False)
+    alerts_snapshot = Column(JSON, nullable=False)
+    incidents_snapshot = Column(JSON, nullable=False)
+    groups_snapshot = Column(JSON, nullable=False)
+    dependencies_snapshot = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    session = relationship("RecordingSession", back_populates="pre_playback_snapshot", foreign_keys=[session_id])

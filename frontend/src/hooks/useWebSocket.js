@@ -37,6 +37,9 @@ export function useWebSocket() {
   const [targetChangesMap, setTargetChangesMap] = useState({});
   const [incidents, setIncidents] = useState([]);
   const [incidentStats, setIncidentStats] = useState({ active_count: 0, review_count: 0, resolved_count: 0 });
+  const [recordingStatus, setRecordingStatus] = useState({ is_recording: false, session_id: null });
+  const [playbackStatus, setPlaybackStatus] = useState({ is_playing: false, is_paused: false, session_id: null, progress: 0 });
+  const [playbackFinished, setPlaybackFinished] = useState(null);
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const resultsRef = useRef({});
@@ -223,6 +226,35 @@ export function useWebSocket() {
               [targetId]: [...roundResultsRef.current[targetId]]
             }));
           }
+        } else if (data.type === 'recording_status') {
+          setRecordingStatus({
+            is_recording: data.is_recording,
+            session_id: data.session_id,
+            session_name: data.session_name,
+            started_at: data.started_at,
+            duration_seconds: data.duration_seconds,
+            recorded_count: data.recorded_count,
+            target_count: data.target_count,
+            last_session: data.last_session,
+          });
+        } else if (data.type === 'playback_status') {
+          setPlaybackStatus({
+            is_playing: data.is_playing,
+            is_paused: data.is_paused,
+            session_id: data.session_id,
+            speed: data.speed,
+            current_index: data.current_index,
+            total_events: data.total_events,
+            virtual_time_ms: data.virtual_time_ms,
+            total_duration_ms: data.total_duration_ms,
+            progress: data.progress,
+          });
+        } else if (data.type === 'playback_finished') {
+          setPlaybackFinished({
+            session_id: data.session_id,
+            timestamp: Date.now(),
+          });
+          setPlaybackStatus({ is_playing: false, is_paused: false, session_id: null, progress: 0 });
         }
       };
 
@@ -322,6 +354,9 @@ export function useWebSocket() {
     targetChangesMap,
     incidents,
     incidentStats,
+    recordingStatus,
+    playbackStatus,
+    playbackFinished,
     getResults,
     getRoundResults,
     setTargets: setTargetsData,
@@ -333,6 +368,7 @@ export function useWebSocket() {
     setActiveChanges: setActiveChangesData,
     setTargetChangesMap: setTargetChangesMapData,
     setIncidents: setIncidentsData,
+    setPlaybackFinished,
     loadInitialData
   };
 }
