@@ -635,3 +635,80 @@ class MaintenanceWindowEvent(Base):
     extra_data = Column(JSON, nullable=True)
 
     window = relationship("MaintenanceWindow", back_populates="events")
+
+
+class DutySchedule(Base):
+    __tablename__ = "duty_schedules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    group_id = Column(Integer, ForeignKey("probe_groups.id"), nullable=True, unique=True, index=True)
+    is_default = Column(Boolean, default=False)
+    timezone = Column(String(50), default="UTC")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    group = relationship("ProbeGroup", backref="duty_schedule")
+    slots = relationship("DutySlot", back_populates="schedule", cascade="all, delete-orphan")
+    swaps = relationship("DutySwap", back_populates="schedule", cascade="all, delete-orphan")
+    dispatched_alerts = relationship("DispatchedAlert", back_populates="schedule", cascade="all, delete-orphan")
+
+
+class DutySlot(Base):
+    __tablename__ = "duty_slots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    schedule_id = Column(Integer, ForeignKey("duty_schedules.id"), nullable=False, index=True)
+    day_of_week = Column(Integer, nullable=False)
+    start_hour = Column(Integer, nullable=False)
+    end_hour = Column(Integer, nullable=False)
+    primary_person = Column(String(100), nullable=False)
+    backup_person = Column(String(100), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    schedule = relationship("DutySchedule", back_populates="slots")
+
+
+class DutySwap(Base):
+    __tablename__ = "duty_swaps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    schedule_id = Column(Integer, ForeignKey("duty_schedules.id"), nullable=False, index=True)
+    swap_date = Column(DateTime, nullable=False, index=True)
+    start_hour = Column(Integer, nullable=False)
+    end_hour = Column(Integer, nullable=False)
+    original_person = Column(String(100), nullable=False)
+    new_person = Column(String(100), nullable=False)
+    role = Column(String(20), default="primary")
+    reason = Column(Text, nullable=False)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    schedule = relationship("DutySchedule", back_populates="swaps")
+
+
+class DispatchedAlert(Base):
+    __tablename__ = "dispatched_alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    alert_id = Column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
+    schedule_id = Column(Integer, ForeignKey("duty_schedules.id"), nullable=False, index=True)
+    group_id = Column(Integer, ForeignKey("probe_groups.id"), nullable=True, index=True)
+    primary_person = Column(String(100), nullable=False)
+    backup_person = Column(String(100), nullable=False)
+    assigned_to = Column(String(100), nullable=True, index=True)
+    dispatch_status = Column(String(30), default="dispatched", index=True)
+    dispatched_at = Column(DateTime, default=datetime.utcnow, index=True)
+    primary_escalated_at = Column(DateTime, nullable=True)
+    backup_escalated_at = Column(DateTime, nullable=True)
+    acknowledged_at = Column(DateTime, nullable=True)
+    acknowledged_by = Column(String(100), nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    resolved_by = Column(String(100), nullable=True)
+    resolution_summary = Column(Text, nullable=True)
+    response_seconds = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    alert = relationship("Alert", backref="dispatch")
+    schedule = relationship("DutySchedule", back_populates="dispatched_alerts")
+    group = relationship("ProbeGroup", backref="dispatched_alerts")

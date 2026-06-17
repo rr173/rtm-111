@@ -17,6 +17,7 @@ import AutoDiscoveryPanel from './components/AutoDiscoveryPanel';
 import RecordingControlPanel from './components/RecordingControlPanel';
 import PlaybackControlPanel from './components/PlaybackControlPanel';
 import MaintenanceCalendar from './components/MaintenanceCalendar';
+import DutyDispatchCenter from './components/DutyDispatchCenter';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
@@ -274,6 +275,12 @@ function App() {
             📅 维护日历
           </button>
           <button
+            className={`tab-btn ${activeTab === 'duty' ? 'active' : ''}`}
+            onClick={() => setActiveTab('duty')}
+          >
+            📟 值班调度
+          </button>
+          <button
             className={`tab-btn ${activeTab === 'replay' ? 'active' : ''}`}
             onClick={() => setActiveTab('replay')}
           >
@@ -385,6 +392,8 @@ function App() {
               groups={groups}
               onRefresh={loadMaintenanceData}
             />
+          ) : activeTab === 'duty' ? (
+            <DutyDispatchCenter />
           ) : activeTab === 'replay' ? (
             <div className="replay-page">
               <div className="replay-panels">
@@ -431,7 +440,7 @@ function App() {
           )}
         </div>
 
-        {activeTab !== 'slo' && activeTab !== 'command' && activeTab !== 'noise' && activeTab !== 'discovery' && activeTab !== 'replay' ? (
+        {activeTab !== 'slo' && activeTab !== 'command' && activeTab !== 'noise' && activeTab !== 'discovery' && activeTab !== 'replay' && activeTab !== 'duty' ? (
           <div className="right-panel">
             <AlertPanel
               alerts={alerts}

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal
-from .models import ProbeTarget, Alert, ProbeResult, ProbeGroup, Dependency, ObservationPoint, Change, ChangeTarget, Incident, IncidentTarget, IncidentAlert, IncidentTimeline, IncidentNote
+from .models import ProbeTarget, Alert, ProbeResult, ProbeGroup, Dependency, ObservationPoint, Change, ChangeTarget, Incident, IncidentTarget, IncidentAlert, IncidentTimeline, IncidentNote, DispatchedAlert
 from .probe_engine import probe_engine
 from .observer_engine import observer_engine
 
@@ -487,6 +487,50 @@ class ConnectionManager:
                 "type": "maintenance_update",
                 "windows": windows,
                 "targets": targets_data
+            })
+        finally:
+            db.close()
+
+    def broadcast_duty_update(self):
+        db = SessionLocal()
+        try:
+            dispatched = db.query(DispatchedAlert).order_by(DispatchedAlert.dispatched_at.desc()).limit(100).all()
+            items = []
+            for da in dispatched:
+                alert = da.alert
+                target_name = alert.target.name if alert and alert.target else None
+                group_name = None
+                if da.group_id:
+                    grp = db.query(ProbeGroup).filter(ProbeGroup.id == da.group_id).first()
+                    if grp:
+                        group_name = grp.name
+                items.append({
+                    "id": da.id,
+                    "alert_id": da.alert_id,
+                    "schedule_id": da.schedule_id,
+                    "group_id": da.group_id,
+                    "group_name": group_name,
+                    "primary_person": da.primary_person,
+                    "backup_person": da.backup_person,
+                    "assigned_to": da.assigned_to,
+                    "dispatch_status": da.dispatch_status,
+                    "dispatched_at": da.dispatched_at.isoformat() if da.dispatched_at else None,
+                    "primary_escalated_at": da.primary_escalated_at.isoformat() if da.primary_escalated_at else None,
+                    "backup_escalated_at": da.backup_escalated_at.isoformat() if da.backup_escalated_at else None,
+                    "acknowledged_at": da.acknowledged_at.isoformat() if da.acknowledged_at else None,
+                    "acknowledged_by": da.acknowledged_by,
+                    "resolved_at": da.resolved_at.isoformat() if da.resolved_at else None,
+                    "resolved_by": da.resolved_by,
+                    "resolution_summary": da.resolution_summary,
+                    "response_seconds": da.response_seconds,
+                    "alert_target_name": target_name,
+                    "alert_from_status": alert.from_status if alert else None,
+                    "alert_to_status": alert.to_status if alert else None,
+                    "alert_timestamp": alert.timestamp.isoformat() if alert and alert.timestamp else None,
+                })
+            self._safe_broadcast({
+                "type": "duty_update",
+                "dispatched_alerts": items,
             })
         finally:
             db.close()

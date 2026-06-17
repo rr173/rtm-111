@@ -271,6 +271,8 @@ export function useWebSocket() {
         } else if (data.type === 'maintenance_update') {
           setMaintenanceWindows(data.windows || []);
           setMaintenanceTargets(data.targets || []);
+        } else if (data.type === 'duty_update') {
+          // duty updates are handled by the DutyDispatchCenter component via polling
         }
       };
 

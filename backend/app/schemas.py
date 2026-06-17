@@ -1166,3 +1166,159 @@ class MaintenanceWindowListResponse(BaseModel):
 class MaintenanceWindowCalendarResponse(BaseModel):
     windows: List[MaintenanceWindowResponse] = []
     targets: List[Dict[str, Any]] = []
+
+
+class DutySlotCreate(BaseModel):
+    day_of_week: int = Field(ge=0, le=6)
+    start_hour: int = Field(ge=0, le=23)
+    end_hour: int = Field(ge=0, le=24)
+    primary_person: str
+    backup_person: str
+
+
+class DutySlotResponse(BaseModel):
+    id: int
+    schedule_id: int
+    day_of_week: int
+    start_hour: int
+    end_hour: int
+    primary_person: str
+    backup_person: str
+
+    class Config:
+        from_attributes = True
+
+
+class DutySwapCreate(BaseModel):
+    swap_date: datetime
+    start_hour: int = Field(ge=0, le=23)
+    end_hour: int = Field(ge=0, le=24)
+    original_person: str
+    new_person: str
+    role: str = "primary"
+    reason: str
+
+
+class DutySwapResponse(BaseModel):
+    id: int
+    schedule_id: int
+    swap_date: datetime
+    start_hour: int
+    end_hour: int
+    original_person: str
+    new_person: str
+    role: str
+    reason: str
+    created_by: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DutyScheduleCreate(BaseModel):
+    name: str
+    group_id: Optional[int] = None
+    is_default: bool = False
+    timezone: str = "Asia/Shanghai"
+    slots: List[DutySlotCreate] = []
+
+
+class DutyScheduleUpdate(BaseModel):
+    name: Optional[str] = None
+    timezone: Optional[str] = None
+
+
+class DutyScheduleResponse(BaseModel):
+    id: int
+    name: str
+    group_id: Optional[int] = None
+    group_name: Optional[str] = None
+    is_default: bool
+    timezone: str
+    slots: List[DutySlotResponse] = []
+    swaps: List[DutySwapResponse] = []
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DispatchedAlertResponse(BaseModel):
+    id: int
+    alert_id: int
+    schedule_id: int
+    group_id: Optional[int] = None
+    group_name: Optional[str] = None
+    primary_person: str
+    backup_person: str
+    assigned_to: Optional[str] = None
+    dispatch_status: str
+    dispatched_at: datetime
+    primary_escalated_at: Optional[datetime] = None
+    backup_escalated_at: Optional[datetime] = None
+    acknowledged_at: Optional[datetime] = None
+    acknowledged_by: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+    resolved_by: Optional[str] = None
+    resolution_summary: Optional[str] = None
+    response_seconds: Optional[float] = None
+    alert_target_name: Optional[str] = None
+    alert_from_status: Optional[str] = None
+    alert_to_status: Optional[str] = None
+    alert_timestamp: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class DispatchAcknowledge(BaseModel):
+    acknowledged_by: str
+
+
+class DispatchResolve(BaseModel):
+    resolved_by: str
+    resolution_summary: str
+
+
+class DutyOverviewResponse(BaseModel):
+    current_primary: Optional[str] = None
+    current_backup: Optional[str] = None
+    current_schedule_name: Optional[str] = None
+    pending_alert_count: int = 0
+    escalated_alert_count: int = 0
+    unattended_alert_count: int = 0
+    avg_response_seconds: Optional[float] = None
+    my_pending_count: int = 0
+    my_resolved_count: int = 0
+
+
+class DutyCalendarSlot(BaseModel):
+    day_of_week: int
+    start_hour: int
+    end_hour: int
+    primary_person: str
+    backup_person: str
+    is_swapped: bool = False
+    swap_reason: Optional[str] = None
+
+
+class DutyCalendarDay(BaseModel):
+    date: str
+    day_of_week: int
+    slots: List[DutyCalendarSlot] = []
+
+
+class DutyCalendarWeek(BaseModel):
+    week_start: str
+    days: List[DutyCalendarDay] = []
+
+
+class DutyPersonHistoryResponse(BaseModel):
+    person: str
+    total_dispatched: int = 0
+    total_acknowledged: int = 0
+    total_resolved: int = 0
+    avg_response_seconds: Optional[float] = None
+    alerts: List[DispatchedAlertResponse] = []

@@ -17,6 +17,7 @@ from .models import (
     Incident, IncidentTarget, IncidentAlert, IncidentTimeline, IncidentNote,
     RegistrySource, SyncEvent, SyncEventDetail,
     MaintenanceWindow, MaintenanceWindowEvent,
+    DutySchedule, DutySlot, DutySwap, DispatchedAlert,
 )
 from .schemas import (
     ProbeTargetCreate, ProbeTargetUpdate, ProbeTargetResponse,
@@ -49,6 +50,10 @@ from .schemas import (
     MaintenanceWindowCreate, MaintenanceWindowUpdate, MaintenanceWindowResponse,
     MaintenanceWindowListResponse, MaintenanceWindowCalendarResponse,
     MaintenanceWindowExtend, MaintenanceWindowCancel, MaintenanceWindowEventResponse,
+    DutySlotCreate, DutySlotResponse, DutySwapCreate, DutySwapResponse,
+    DutyScheduleCreate, DutyScheduleUpdate, DutyScheduleResponse,
+    DispatchedAlertResponse, DispatchAcknowledge, DispatchResolve,
+    DutyOverviewResponse, DutyCalendarWeek, DutyPersonHistoryResponse,
 )
 from .observer_engine import observer_engine
 from .probe_engine import probe_engine
@@ -57,6 +62,7 @@ from .websocket_manager import manager, get_target_history
 from .recording_engine import recording_engine
 from .playback_engine import playback_engine
 from .maintenance_engine import maintenance_engine
+from .duty_engine import duty_engine
 from pydantic import BaseModel
 from typing import List as TypingList
 
@@ -874,6 +880,104 @@ def _migrate_database():
                             conn.execute(text(idx_sql))
                     print(f"Created table {table_name}")
 
+            duty_tables = {
+                "duty_schedules": """
+                    CREATE TABLE duty_schedules (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name VARCHAR(255) NOT NULL,
+                        group_id INTEGER UNIQUE,
+                        is_default INTEGER DEFAULT 0,
+                        timezone VARCHAR(50) DEFAULT 'UTC',
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (group_id) REFERENCES probe_groups(id) ON DELETE SET NULL
+                    )
+                """,
+                "duty_slots": """
+                    CREATE TABLE duty_slots (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        schedule_id INTEGER NOT NULL,
+                        day_of_week INTEGER NOT NULL,
+                        start_hour INTEGER NOT NULL,
+                        end_hour INTEGER NOT NULL,
+                        primary_person VARCHAR(100) NOT NULL,
+                        backup_person VARCHAR(100) NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (schedule_id) REFERENCES duty_schedules(id) ON DELETE CASCADE
+                    )
+                """,
+                "duty_swaps": """
+                    CREATE TABLE duty_swaps (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        schedule_id INTEGER NOT NULL,
+                        swap_date DATETIME NOT NULL,
+                        start_hour INTEGER NOT NULL,
+                        end_hour INTEGER NOT NULL,
+                        original_person VARCHAR(100) NOT NULL,
+                        new_person VARCHAR(100) NOT NULL,
+                        role VARCHAR(20) DEFAULT 'primary',
+                        reason TEXT NOT NULL,
+                        created_by VARCHAR(100),
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (schedule_id) REFERENCES duty_schedules(id) ON DELETE CASCADE
+                    )
+                """,
+                "dispatched_alerts": """
+                    CREATE TABLE dispatched_alerts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        alert_id INTEGER NOT NULL,
+                        schedule_id INTEGER NOT NULL,
+                        group_id INTEGER,
+                        primary_person VARCHAR(100) NOT NULL,
+                        backup_person VARCHAR(100) NOT NULL,
+                        assigned_to VARCHAR(100),
+                        dispatch_status VARCHAR(30) DEFAULT 'dispatched',
+                        dispatched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        primary_escalated_at DATETIME,
+                        backup_escalated_at DATETIME,
+                        acknowledged_at DATETIME,
+                        acknowledged_by VARCHAR(100),
+                        resolved_at DATETIME,
+                        resolved_by VARCHAR(100),
+                        resolution_summary TEXT,
+                        response_seconds REAL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE,
+                        FOREIGN KEY (schedule_id) REFERENCES duty_schedules(id) ON DELETE CASCADE,
+                        FOREIGN KEY (group_id) REFERENCES probe_groups(id) ON DELETE SET NULL
+                    )
+                """,
+            }
+
+            for table_name, create_sql in duty_tables.items():
+                result = conn.execute(text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"))
+                if not result.fetchone():
+                    conn.execute(text(create_sql))
+                    index_sqls = {
+                        "duty_schedules": [
+                            "CREATE INDEX idx_ds_group_id ON duty_schedules(group_id)",
+                        ],
+                        "duty_slots": [
+                            "CREATE INDEX idx_dslot_schedule_id ON duty_slots(schedule_id)",
+                        ],
+                        "duty_swaps": [
+                            "CREATE INDEX idx_dsw_schedule_id ON duty_swaps(schedule_id)",
+                            "CREATE INDEX idx_dsw_swap_date ON duty_swaps(swap_date)",
+                        ],
+                        "dispatched_alerts": [
+                            "CREATE INDEX idx_da_alert_id ON dispatched_alerts(alert_id)",
+                            "CREATE INDEX idx_da_schedule_id ON dispatched_alerts(schedule_id)",
+                            "CREATE INDEX idx_da_group_id ON dispatched_alerts(group_id)",
+                            "CREATE INDEX idx_da_assigned_to ON dispatched_alerts(assigned_to)",
+                            "CREATE INDEX idx_da_dispatch_status ON dispatched_alerts(dispatch_status)",
+                            "CREATE INDEX idx_da_dispatched_at ON dispatched_alerts(dispatched_at)",
+                        ],
+                    }
+                    if table_name in index_sqls:
+                        for idx_sql in index_sqls[table_name]:
+                            conn.execute(text(idx_sql))
+                    print(f"Created table {table_name}")
+
             conn.commit()
         except Exception as e:
             print(f"Migration error: {e}")
@@ -904,6 +1008,7 @@ async def startup_event():
     recording_engine.set_loop(loop)
     playback_engine.set_loop(loop)
     maintenance_engine.set_loop(loop)
+    duty_engine.set_loop(loop)
 
     if os.getenv("RESET_DEMO_DATA", "false").lower() == "true":
         db_path = "./data/probes.db"
@@ -923,12 +1028,15 @@ async def startup_event():
     _init_demo_changes()
     _init_demo_slo()
     _init_demo_incidents()
+    _init_demo_duty()
     incident_engine.attach_callbacks()
     maintenance_engine.register_status_callback(lambda data: manager.broadcast_maintenance_update())
     await observer_engine.start()
     await probe_engine.start()
     await sync_engine.start()
     await maintenance_engine.start()
+    duty_engine.register_alert_callback(lambda: manager.broadcast_duty_update())
+    await duty_engine.start()
 
 
 @app.on_event("shutdown")
@@ -937,6 +1045,7 @@ async def shutdown_event():
     await probe_engine.stop()
     await sync_engine.stop()
     await maintenance_engine.stop()
+    await duty_engine.stop()
 
 
 def _init_demo_slo():
@@ -4428,6 +4537,193 @@ def _init_demo_changes():
         db.close()
 
 
+def _init_demo_duty():
+    db = next(get_db())
+    try:
+        schedule_count = db.query(DutySchedule).count()
+        if schedule_count > 0:
+            return
+
+        now = datetime.utcnow()
+        group_prod = db.query(ProbeGroup).filter(ProbeGroup.name.like("%生产%")).first()
+
+        default_schedule = DutySchedule(
+            name="全局默认值班表",
+            group_id=None,
+            is_default=True,
+            timezone="Asia/Shanghai",
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(default_schedule)
+        db.flush()
+
+        weekday_slots = [
+            DutySlot(schedule_id=default_schedule.id, day_of_week=0, start_hour=0, end_hour=8, primary_person="赵六", backup_person="孙七", created_at=now),
+            DutySlot(schedule_id=default_schedule.id, day_of_week=0, start_hour=8, end_hour=18, primary_person="张三", backup_person="李四", created_at=now),
+            DutySlot(schedule_id=default_schedule.id, day_of_week=0, start_hour=18, end_hour=24, primary_person="李四", backup_person="王五", created_at=now),
+            DutySlot(schedule_id=default_schedule.id, day_of_week=1, start_hour=0, end_hour=8, primary_person="赵六", backup_person="孙七", created_at=now),
+            DutySlot(schedule_id=default_schedule.id, day_of_week=1, start_hour=8, end_hour=18, primary_person="张三", backup_person="李四", created_at=now),
+            DutySlot(schedule_id=default_schedule.id, day_of_week=1, start_hour=18, end_hour=24, primary_person="李四", backup_person="王五", created_at=now),
+            DutySlot(schedule_id=default_schedule.id, day_of_week=2, start_hour=0, end_hour=8, primary_person="赵六", backup_person="孙七", created_at=now),
+            DutySlot(schedule_id=default_schedule.id, day_of_week=2, start_hour=8, end_hour=18, primary_person="张三", backup_person="王五", created_at=now),
+            DutySlot(schedule_id=default_schedule.id, day_of_week=2, start_hour=18, end_hour=24, primary_person="王五", backup_person="李四", created_at=now),
+            DutySlot(schedule_id=default_schedule.id, day_of_week=3, start_hour=0, end_hour=8, primary_person="赵六", backup_person="孙七", created_at=now),
+            DutySlot(schedule_id=default_schedule.id, day_of_week=3, start_hour=8, end_hour=18, primary_person="李四", backup_person="张三", created_at=now),
+            DutySlot(schedule_id=default_schedule.id, day_of_week=3, start_hour=18, end_hour=24, primary_person="王五", backup_person="赵六", created_at=now),
+            DutySlot(schedule_id=default_schedule.id, day_of_week=4, start_hour=0, end_hour=8, primary_person="赵六", backup_person="孙七", created_at=now),
+            DutySlot(schedule_id=default_schedule.id, day_of_week=4, start_hour=8, end_hour=18, primary_person="张三", backup_person="李四", created_at=now),
+            DutySlot(schedule_id=default_schedule.id, day_of_week=4, start_hour=18, end_hour=24, primary_person="李四", backup_person="王五", created_at=now),
+            DutySlot(schedule_id=default_schedule.id, day_of_week=5, start_hour=0, end_hour=24, primary_person="王五", backup_person="赵六", created_at=now),
+            DutySlot(schedule_id=default_schedule.id, day_of_week=6, start_hour=0, end_hour=24, primary_person="王五", backup_person="赵六", created_at=now),
+        ]
+        for slot in weekday_slots:
+            db.add(slot)
+
+        if group_prod:
+            prod_schedule = DutySchedule(
+                name="生产环境值班表",
+                group_id=group_prod.id,
+                is_default=False,
+                timezone="Asia/Shanghai",
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(prod_schedule)
+            db.flush()
+
+            prod_slots = [
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=0, start_hour=0, end_hour=9, primary_person="周八", backup_person="吴九", created_at=now),
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=0, start_hour=9, end_hour=18, primary_person="陈一", backup_person="周八", created_at=now),
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=0, start_hour=18, end_hour=24, primary_person="吴九", backup_person="陈一", created_at=now),
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=1, start_hour=0, end_hour=9, primary_person="周八", backup_person="吴九", created_at=now),
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=1, start_hour=9, end_hour=18, primary_person="陈一", backup_person="周八", created_at=now),
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=1, start_hour=18, end_hour=24, primary_person="吴九", backup_person="陈一", created_at=now),
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=2, start_hour=0, end_hour=9, primary_person="周八", backup_person="吴九", created_at=now),
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=2, start_hour=9, end_hour=18, primary_person="陈一", backup_person="吴九", created_at=now),
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=2, start_hour=18, end_hour=24, primary_person="吴九", backup_person="周八", created_at=now),
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=3, start_hour=0, end_hour=9, primary_person="周八", backup_person="陈一", created_at=now),
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=3, start_hour=9, end_hour=18, primary_person="吴九", backup_person="陈一", created_at=now),
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=3, start_hour=18, end_hour=24, primary_person="陈一", backup_person="周八", created_at=now),
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=4, start_hour=0, end_hour=9, primary_person="周八", backup_person="吴九", created_at=now),
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=4, start_hour=9, end_hour=18, primary_person="陈一", backup_person="周八", created_at=now),
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=4, start_hour=18, end_hour=24, primary_person="吴九", backup_person="陈一", created_at=now),
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=5, start_hour=0, end_hour=24, primary_person="吴九", backup_person="周八", created_at=now),
+                DutySlot(schedule_id=prod_schedule.id, day_of_week=6, start_hour=0, end_hour=24, primary_person="周八", backup_person="吴九", created_at=now),
+            ]
+            for slot in prod_slots:
+                db.add(slot)
+
+        db.flush()
+
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        swap = DutySwap(
+            schedule_id=default_schedule.id,
+            swap_date=today + timedelta(days=2),
+            start_hour=8,
+            end_hour=18,
+            original_person="张三",
+            new_person="李四",
+            role="primary",
+            reason="张三参加技术培训,临时换班",
+            created_by="管理员",
+            created_at=now,
+        )
+        db.add(swap)
+
+        alerts = db.query(Alert).order_by(Alert.timestamp.desc()).limit(5).all()
+        if alerts:
+            schedule_for_dispatch = default_schedule
+            day_of_week = now.weekday()
+            current_hour = now.hour
+            for i, alert in enumerate(alerts[:3]):
+                slot = db.query(DutySlot).filter(
+                    DutySlot.schedule_id == schedule_for_dispatch.id,
+                    DutySlot.day_of_week == day_of_week,
+                    DutySlot.start_hour <= current_hour,
+                    DutySlot.end_hour > current_hour,
+                ).first()
+                if not slot:
+                    slot = db.query(DutySlot).filter(
+                        DutySlot.schedule_id == schedule_for_dispatch.id,
+                        DutySlot.day_of_week == day_of_week,
+                    ).first()
+
+                if slot:
+                    if i == 0:
+                        da = DispatchedAlert(
+                            alert_id=alert.id,
+                            schedule_id=schedule_for_dispatch.id,
+                            group_id=group_prod.id if group_prod else None,
+                            primary_person=slot.primary_person,
+                            backup_person=slot.backup_person,
+                            assigned_to=slot.primary_person,
+                            dispatch_status="dispatched",
+                            dispatched_at=now - timedelta(minutes=2),
+                        )
+                    elif i == 1:
+                        da = DispatchedAlert(
+                            alert_id=alert.id,
+                            schedule_id=schedule_for_dispatch.id,
+                            group_id=None,
+                            primary_person=slot.primary_person,
+                            backup_person=slot.backup_person,
+                            assigned_to=slot.backup_person,
+                            dispatch_status="primary_escalated",
+                            dispatched_at=now - timedelta(minutes=12),
+                            primary_escalated_at=now - timedelta(minutes=7),
+                        )
+                    else:
+                        da = DispatchedAlert(
+                            alert_id=alert.id,
+                            schedule_id=schedule_for_dispatch.id,
+                            group_id=None,
+                            primary_person=slot.primary_person,
+                            backup_person=slot.backup_person,
+                            assigned_to=slot.primary_person,
+                            dispatch_status="acknowledged",
+                            dispatched_at=now - timedelta(hours=2),
+                            acknowledged_at=now - timedelta(hours=1, minutes=57),
+                            acknowledged_by=slot.primary_person,
+                        )
+                    db.add(da)
+
+            resolved_alerts = db.query(Alert).order_by(Alert.timestamp.desc()).offset(3).limit(3).all()
+            for alert in resolved_alerts:
+                slot = db.query(DutySlot).filter(
+                    DutySlot.schedule_id == schedule_for_dispatch.id,
+                    DutySlot.day_of_week == ((day_of_week - 1) % 7),
+                ).first()
+                if slot:
+                    da = DispatchedAlert(
+                        alert_id=alert.id,
+                        schedule_id=schedule_for_dispatch.id,
+                        group_id=None,
+                        primary_person=slot.primary_person,
+                        backup_person=slot.backup_person,
+                        assigned_to=slot.primary_person,
+                        dispatch_status="resolved",
+                        dispatched_at=now - timedelta(days=1, hours=3),
+                        acknowledged_at=now - timedelta(days=1, hours=2, minutes=58),
+                        acknowledged_by=slot.primary_person,
+                        resolved_at=now - timedelta(days=1, hours=2),
+                        resolved_by=slot.primary_person,
+                        resolution_summary="服务重启后恢复正常，根因是内存泄漏导致OOM",
+                        response_seconds=120,
+                    )
+                    db.add(da)
+
+        db.commit()
+        print("Demo duty data initialized")
+    except Exception as e:
+        print(f"Demo duty init error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.rollback()
+    finally:
+        db.close()
+
+
 @app.get("/api/changes", response_model=List[ChangeResponse])
 def list_changes(
     status: str = None,
@@ -6089,4 +6385,402 @@ def playback_seek(req: SeekRequest):
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
+
+
+@app.get("/api/duty/schedules", response_model=List[DutyScheduleResponse])
+def list_duty_schedules(db: Session = Depends(get_db)):
+    schedules = db.query(DutySchedule).options(
+        joinedload(DutySchedule.slots),
+        joinedload(DutySchedule.swaps),
+    ).all()
+    result = []
+    for s in schedules:
+        group_name = s.group.name if s.group else None
+        result.append({
+            "id": s.id,
+            "name": s.name,
+            "group_id": s.group_id,
+            "group_name": group_name,
+            "is_default": s.is_default,
+            "timezone": s.timezone,
+            "slots": s.slots,
+            "swaps": s.swaps,
+            "created_at": s.created_at,
+            "updated_at": s.updated_at,
+        })
+    return result
+
+
+@app.get("/api/duty/schedules/{schedule_id}", response_model=DutyScheduleResponse)
+def get_duty_schedule(schedule_id: int, db: Session = Depends(get_db)):
+    schedule = db.query(DutySchedule).options(
+        joinedload(DutySchedule.slots),
+        joinedload(DutySchedule.swaps),
+    ).filter(DutySchedule.id == schedule_id).first()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    group_name = schedule.group.name if schedule.group else None
+    return {
+        "id": schedule.id,
+        "name": schedule.name,
+        "group_id": schedule.group_id,
+        "group_name": group_name,
+        "is_default": schedule.is_default,
+        "timezone": schedule.timezone,
+        "slots": schedule.slots,
+        "swaps": schedule.swaps,
+        "created_at": schedule.created_at,
+        "updated_at": schedule.updated_at,
+    }
+
+
+@app.post("/api/duty/schedules", response_model=DutyScheduleResponse)
+def create_duty_schedule(schedule: DutyScheduleCreate, db: Session = Depends(get_db)):
+    if schedule.group_id:
+        existing = db.query(DutySchedule).filter(DutySchedule.group_id == schedule.group_id).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Group already has a schedule")
+    if schedule.is_default:
+        existing_default = db.query(DutySchedule).filter(DutySchedule.is_default == True).first()
+        if existing_default:
+            raise HTTPException(status_code=400, detail="Default schedule already exists")
+
+    now = datetime.utcnow()
+    new_schedule = DutySchedule(
+        name=schedule.name,
+        group_id=schedule.group_id,
+        is_default=schedule.is_default,
+        timezone=schedule.timezone,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(new_schedule)
+    db.flush()
+
+    for slot_data in schedule.slots:
+        slot = DutySlot(
+            schedule_id=new_schedule.id,
+            day_of_week=slot_data.day_of_week,
+            start_hour=slot_data.start_hour,
+            end_hour=slot_data.end_hour,
+            primary_person=slot_data.primary_person,
+            backup_person=slot_data.backup_person,
+            created_at=now,
+        )
+        db.add(slot)
+
+    db.commit()
+    db.refresh(new_schedule)
+
+    group_name = new_schedule.group.name if new_schedule.group else None
+    return {
+        "id": new_schedule.id,
+        "name": new_schedule.name,
+        "group_id": new_schedule.group_id,
+        "group_name": group_name,
+        "is_default": new_schedule.is_default,
+        "timezone": new_schedule.timezone,
+        "slots": new_schedule.slots,
+        "swaps": new_schedule.swaps,
+        "created_at": new_schedule.created_at,
+        "updated_at": new_schedule.updated_at,
+    }
+
+
+@app.put("/api/duty/schedules/{schedule_id}", response_model=DutyScheduleResponse)
+def update_duty_schedule(schedule_id: int, update: DutyScheduleUpdate, db: Session = Depends(get_db)):
+    schedule = db.query(DutySchedule).filter(DutySchedule.id == schedule_id).first()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    if update.name is not None:
+        schedule.name = update.name
+    if update.timezone is not None:
+        schedule.timezone = update.timezone
+    schedule.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(schedule)
+
+    group_name = schedule.group.name if schedule.group else None
+    return {
+        "id": schedule.id,
+        "name": schedule.name,
+        "group_id": schedule.group_id,
+        "group_name": group_name,
+        "is_default": schedule.is_default,
+        "timezone": schedule.timezone,
+        "slots": schedule.slots,
+        "swaps": schedule.swaps,
+        "created_at": schedule.created_at,
+        "updated_at": schedule.updated_at,
+    }
+
+
+@app.delete("/api/duty/schedules/{schedule_id}")
+def delete_duty_schedule(schedule_id: int, db: Session = Depends(get_db)):
+    schedule = db.query(DutySchedule).filter(DutySchedule.id == schedule_id).first()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    db.delete(schedule)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/duty/schedules/{schedule_id}/slots", response_model=DutySlotResponse)
+def add_duty_slot(schedule_id: int, slot: DutySlotCreate, db: Session = Depends(get_db)):
+    schedule = db.query(DutySchedule).filter(DutySchedule.id == schedule_id).first()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    new_slot = DutySlot(
+        schedule_id=schedule_id,
+        day_of_week=slot.day_of_week,
+        start_hour=slot.start_hour,
+        end_hour=slot.end_hour,
+        primary_person=slot.primary_person,
+        backup_person=slot.backup_person,
+        created_at=datetime.utcnow(),
+    )
+    db.add(new_slot)
+    db.commit()
+    db.refresh(new_slot)
+    return new_slot
+
+
+@app.put("/api/duty/slots/{slot_id}", response_model=DutySlotResponse)
+def update_duty_slot(slot_id: int, slot: DutySlotCreate, db: Session = Depends(get_db)):
+    existing = db.query(DutySlot).filter(DutySlot.id == slot_id).first()
+    if not existing:
+        raise HTTPException(status_code=404, detail="Slot not found")
+    existing.day_of_week = slot.day_of_week
+    existing.start_hour = slot.start_hour
+    existing.end_hour = slot.end_hour
+    existing.primary_person = slot.primary_person
+    existing.backup_person = slot.backup_person
+    db.commit()
+    db.refresh(existing)
+    return existing
+
+
+@app.delete("/api/duty/slots/{slot_id}")
+def delete_duty_slot(slot_id: int, db: Session = Depends(get_db)):
+    slot = db.query(DutySlot).filter(DutySlot.id == slot_id).first()
+    if not slot:
+        raise HTTPException(status_code=404, detail="Slot not found")
+    db.delete(slot)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/duty/schedules/{schedule_id}/swaps", response_model=DutySwapResponse)
+def create_duty_swap(schedule_id: int, swap: DutySwapCreate, db: Session = Depends(get_db)):
+    schedule = db.query(DutySchedule).filter(DutySchedule.id == schedule_id).first()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    new_swap = DutySwap(
+        schedule_id=schedule_id,
+        swap_date=swap.swap_date,
+        start_hour=swap.start_hour,
+        end_hour=swap.end_hour,
+        original_person=swap.original_person,
+        new_person=swap.new_person,
+        role=swap.role,
+        reason=swap.reason,
+        created_by=None,
+        created_at=datetime.utcnow(),
+    )
+    db.add(new_swap)
+    db.commit()
+    db.refresh(new_swap)
+    manager.broadcast_duty_update()
+    return new_swap
+
+
+@app.delete("/api/duty/swaps/{swap_id}")
+def delete_duty_swap(swap_id: int, db: Session = Depends(get_db)):
+    swap = db.query(DutySwap).filter(DutySwap.id == swap_id).first()
+    if not swap:
+        raise HTTPException(status_code=404, detail="Swap not found")
+    db.delete(swap)
+    db.commit()
+    manager.broadcast_duty_update()
+    return {"ok": True}
+
+
+@app.get("/api/duty/overview", response_model=DutyOverviewResponse)
+def get_duty_overview(person: str = None):
+    return duty_engine.get_overview(person=person)
+
+
+@app.get("/api/duty/calendar", response_model=DutyCalendarWeek)
+def get_duty_calendar(schedule_id: int = None, week_offset: int = 0):
+    return duty_engine.get_calendar_week(schedule_id=schedule_id, week_offset=week_offset)
+
+
+@app.get("/api/duty/dispatched", response_model=List[DispatchedAlertResponse])
+def list_dispatched_alerts(status: str = None, person: str = None, db: Session = Depends(get_db)):
+    query = db.query(DispatchedAlert)
+    if status:
+        query = query.filter(DispatchedAlert.dispatch_status == status)
+    if person:
+        query = query.filter(
+            (DispatchedAlert.assigned_to == person) |
+            (DispatchedAlert.primary_person == person) |
+            (DispatchedAlert.backup_person == person)
+        )
+    dispatched = query.order_by(DispatchedAlert.dispatched_at.desc()).limit(100).all()
+    result = []
+    for da in dispatched:
+        alert = da.alert
+        target_name = alert.target.name if alert and alert.target else None
+        group_name = None
+        if da.group_id:
+            grp = db.query(ProbeGroup).filter(ProbeGroup.id == da.group_id).first()
+            if grp:
+                group_name = grp.name
+        result.append({
+            "id": da.id,
+            "alert_id": da.alert_id,
+            "schedule_id": da.schedule_id,
+            "group_id": da.group_id,
+            "group_name": group_name,
+            "primary_person": da.primary_person,
+            "backup_person": da.backup_person,
+            "assigned_to": da.assigned_to,
+            "dispatch_status": da.dispatch_status,
+            "dispatched_at": da.dispatched_at,
+            "primary_escalated_at": da.primary_escalated_at,
+            "backup_escalated_at": da.backup_escalated_at,
+            "acknowledged_at": da.acknowledged_at,
+            "acknowledged_by": da.acknowledged_by,
+            "resolved_at": da.resolved_at,
+            "resolved_by": da.resolved_by,
+            "resolution_summary": da.resolution_summary,
+            "response_seconds": da.response_seconds,
+            "alert_target_name": target_name,
+            "alert_from_status": alert.from_status if alert else None,
+            "alert_to_status": alert.to_status if alert else None,
+            "alert_timestamp": alert.timestamp if alert else None,
+        })
+    return result
+
+
+@app.post("/api/duty/dispatched/{dispatch_id}/acknowledge", response_model=DispatchedAlertResponse)
+def acknowledge_dispatch(dispatch_id: int, req: DispatchAcknowledge, db: Session = Depends(get_db)):
+    da = db.query(DispatchedAlert).filter(DispatchedAlert.id == dispatch_id).first()
+    if not da:
+        raise HTTPException(status_code=404, detail="Dispatched alert not found")
+    if da.dispatch_status in ["resolved"]:
+        raise HTTPException(status_code=400, detail="Alert already resolved")
+    if da.acknowledged_at:
+        raise HTTPException(status_code=400, detail="Alert already acknowledged")
+
+    now = datetime.utcnow()
+    da.acknowledged_at = now
+    da.acknowledged_by = req.acknowledged_by
+    da.assigned_to = req.acknowledged_by
+    da.dispatch_status = "acknowledged"
+    da.response_seconds = (now - da.dispatched_at).total_seconds()
+    db.commit()
+    db.refresh(da)
+    manager.broadcast_duty_update()
+
+    alert = da.alert
+    target_name = alert.target.name if alert and alert.target else None
+    group_name = None
+    if da.group_id:
+        grp = db.query(ProbeGroup).filter(ProbeGroup.id == da.group_id).first()
+        if grp:
+            group_name = grp.name
+    return {
+        "id": da.id,
+        "alert_id": da.alert_id,
+        "schedule_id": da.schedule_id,
+        "group_id": da.group_id,
+        "group_name": group_name,
+        "primary_person": da.primary_person,
+        "backup_person": da.backup_person,
+        "assigned_to": da.assigned_to,
+        "dispatch_status": da.dispatch_status,
+        "dispatched_at": da.dispatched_at,
+        "primary_escalated_at": da.primary_escalated_at,
+        "backup_escalated_at": da.backup_escalated_at,
+        "acknowledged_at": da.acknowledged_at,
+        "acknowledged_by": da.acknowledged_by,
+        "resolved_at": da.resolved_at,
+        "resolved_by": da.resolved_by,
+        "resolution_summary": da.resolution_summary,
+        "response_seconds": da.response_seconds,
+        "alert_target_name": target_name,
+        "alert_from_status": alert.from_status if alert else None,
+        "alert_to_status": alert.to_status if alert else None,
+        "alert_timestamp": alert.timestamp if alert else None,
+    }
+
+
+@app.post("/api/duty/dispatched/{dispatch_id}/resolve", response_model=DispatchedAlertResponse)
+def resolve_dispatch(dispatch_id: int, req: DispatchResolve, db: Session = Depends(get_db)):
+    da = db.query(DispatchedAlert).filter(DispatchedAlert.id == dispatch_id).first()
+    if not da:
+        raise HTTPException(status_code=404, detail="Dispatched alert not found")
+    if da.dispatch_status == "resolved":
+        raise HTTPException(status_code=400, detail="Alert already resolved")
+    if not da.acknowledged_at:
+        raise HTTPException(status_code=400, detail="Alert must be acknowledged before resolving")
+
+    now = datetime.utcnow()
+    da.resolved_at = now
+    da.resolved_by = req.resolved_by
+    da.resolution_summary = req.resolution_summary
+    da.dispatch_status = "resolved"
+    db.commit()
+    db.refresh(da)
+    manager.broadcast_duty_update()
+
+    alert = da.alert
+    target_name = alert.target.name if alert and alert.target else None
+    group_name = None
+    if da.group_id:
+        grp = db.query(ProbeGroup).filter(ProbeGroup.id == da.group_id).first()
+        if grp:
+            group_name = grp.name
+    return {
+        "id": da.id,
+        "alert_id": da.alert_id,
+        "schedule_id": da.schedule_id,
+        "group_id": da.group_id,
+        "group_name": group_name,
+        "primary_person": da.primary_person,
+        "backup_person": da.backup_person,
+        "assigned_to": da.assigned_to,
+        "dispatch_status": da.dispatch_status,
+        "dispatched_at": da.dispatched_at,
+        "primary_escalated_at": da.primary_escalated_at,
+        "backup_escalated_at": da.backup_escalated_at,
+        "acknowledged_at": da.acknowledged_at,
+        "acknowledged_by": da.acknowledged_by,
+        "resolved_at": da.resolved_at,
+        "resolved_by": da.resolved_by,
+        "resolution_summary": da.resolution_summary,
+        "response_seconds": da.response_seconds,
+        "alert_target_name": target_name,
+        "alert_from_status": alert.from_status if alert else None,
+        "alert_to_status": alert.to_status if alert else None,
+        "alert_timestamp": alert.timestamp if alert else None,
+    }
+
+
+@app.post("/api/duty/dispatch")
+def manual_dispatch_alert(alert_id: int, group_id: int = None, db: Session = Depends(get_db)):
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    da = duty_engine.dispatch_alert(alert_id, group_id=group_id)
+    if not da:
+        raise HTTPException(status_code=400, detail="No matching schedule found for dispatch")
+    manager.broadcast_duty_update()
+    return {"ok": True, "dispatch_id": da.id}
+
+
+@app.get("/api/duty/person-history", response_model=DutyPersonHistoryResponse)
+def get_person_history(person: str, limit: int = 50):
+    return duty_engine.get_person_history(person=person, limit=limit)
 
