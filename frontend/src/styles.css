@@ -9496,6 +9496,13 @@ body {
   justify-content: flex-end;
 }
 
+.duty-error-text {
+  color: #ef4444;
+  font-size: 13px;
+  margin-top: 12px;
+  text-align: center;
+}
+
 .duty-history {
   width: 100%;
 }

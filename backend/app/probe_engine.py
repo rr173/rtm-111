@@ -7,9 +7,10 @@ import httpx
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal
-from .models import ProbeTarget, ProbeResult, Alert, Dependency
+from .models import ProbeTarget, ProbeResult, Alert, Dependency, ProbeGroup
 from .rule_engine import rule_engine
 from .observer_engine import observer_engine
+from .duty_engine import duty_engine
 from collections import deque
 
 
@@ -127,8 +128,14 @@ class ProbeEngine:
                 async with self.semaphore:
                     result = await self._execute_probe(target)
                     self._save_result(db, target, result)
-                    self._update_state_machine(db, target, result)
+                    new_alert = self._update_state_machine(db, target, result)
                     db.commit()
+
+                    if new_alert:
+                        try:
+                            duty_engine.dispatch_alert(new_alert.id, target.group_id)
+                        except Exception as de:
+                            print(f"Dispatch alert error: {de}")
 
                     db.refresh(target)
                     self._notify_result(target, result)
@@ -337,7 +344,11 @@ class ProbeEngine:
 
             self._update_cascade_status(db, target)
 
+            self._notify_status_change(target)
+            return alert
+
         self._notify_status_change(target)
+        return None
 
     def _get_effective_thresholds(self, target: ProbeTarget) -> dict:
         degrade_threshold = 2

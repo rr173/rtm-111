@@ -24,6 +24,7 @@ class DutyEngine:
         self._alert_callback = callback
 
     async def start(self):
+        self._check_escalations()
         self._task = asyncio.create_task(self._escalation_loop())
 
     async def stop(self):
@@ -38,7 +39,9 @@ class DutyEngine:
         while True:
             try:
                 await asyncio.sleep(10)
-                self._check_escalations()
+                changed = self._check_escalations()
+                if changed and self._alert_callback:
+                    self._alert_callback()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -46,6 +49,7 @@ class DutyEngine:
 
     def _check_escalations(self):
         db = SessionLocal()
+        changed = False
         try:
             now = datetime.utcnow()
             dispatched = db.query(DispatchedAlert).filter(
@@ -60,6 +64,7 @@ class DutyEngine:
                         da.primary_escalated_at = now
                         da.assigned_to = da.backup_person
                         db.commit()
+                        changed = True
                         print(f"DispatchedAlert {da.id} escalated to backup {da.backup_person}")
 
                 elif da.dispatch_status == "primary_escalated":
@@ -69,12 +74,13 @@ class DutyEngine:
                         da.backup_escalated_at = now
                         da.assigned_to = None
                         db.commit()
+                        changed = True
                         print(f"DispatchedAlert {da.id} marked as unattended")
 
-            if self._alert_callback and dispatched:
-                self._alert_callback()
+            return changed
         except Exception as e:
             print(f"Escalation check error: {e}")
+            return False
         finally:
             db.close()
 
@@ -133,6 +139,8 @@ class DutyEngine:
             db.add(da)
             db.commit()
             db.refresh(da)
+            if self._alert_callback:
+                self._alert_callback()
             return da
         finally:
             db.close()

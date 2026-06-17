@@ -172,6 +172,7 @@ function CalendarTab({ schedules, selectedScheduleId, onSelectSchedule }) {
   const [calendar, setCalendar] = useState(null);
   const [dragSlot, setDragSlot] = useState(null);
   const [showSwapModal, setShowSwapModal] = useState(null);
+  const [swapError, setSwapError] = useState('');
 
   const loadCalendar = useCallback(async () => {
     try {
@@ -333,10 +334,19 @@ function CalendarTab({ schedules, selectedScheduleId, onSelectSchedule }) {
             <div className="duty-modal-actions">
               <button className="duty-btn duty-btn-primary" onClick={() => {
                 const reason = document.getElementById('swap-reason-input')?.value;
-                if (reason?.trim()) handleSwapSubmit(reason.trim());
+                if (!reason || !reason.trim()) {
+                  setSwapError('请填写换班原因');
+                  return;
+                }
+                setSwapError('');
+                handleSwapSubmit(reason.trim());
               }}>确认换班</button>
-              <button className="duty-btn duty-btn-cancel" onClick={() => setShowSwapModal(null)}>取消</button>
+              <button className="duty-btn duty-btn-cancel" onClick={() => {
+                setShowSwapModal(null);
+                setSwapError('');
+              }}>取消</button>
             </div>
+            {swapError && <div className="duty-error-text">{swapError}</div>}
           </div>
         </div>
       )}

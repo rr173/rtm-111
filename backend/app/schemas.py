@@ -1193,10 +1193,10 @@ class DutySwapCreate(BaseModel):
     swap_date: datetime
     start_hour: int = Field(ge=0, le=23)
     end_hour: int = Field(ge=0, le=24)
-    original_person: str
-    new_person: str
+    original_person: str = Field(min_length=1, max_length=100)
+    new_person: str = Field(min_length=1, max_length=100)
     role: str = "primary"
-    reason: str
+    reason: str = Field(min_length=1, max_length=500, description="换班原因不能为空")
 
 
 class DutySwapResponse(BaseModel):
