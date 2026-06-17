@@ -1070,3 +1070,83 @@ class SyncEventResponse(BaseModel):
 class SyncEventListResponse(BaseModel):
     items: List[SyncEventResponse] = []
     total: int = 0
+
+
+class MaintenanceWindowCreate(BaseModel):
+    target_id: int
+    title: str
+    description: Optional[str] = None
+    start_time: datetime
+    end_time: datetime
+    reason: Optional[str] = None
+    owner: Optional[str] = None
+    created_by: Optional[str] = None
+
+
+class MaintenanceWindowUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    reason: Optional[str] = None
+    owner: Optional[str] = None
+
+
+class MaintenanceWindowExtend(BaseModel):
+    end_time: datetime
+    extension_reason: str
+
+
+class MaintenanceWindowCancel(BaseModel):
+    cancelled_reason: Optional[str] = None
+
+
+class MaintenanceWindowEventResponse(BaseModel):
+    id: int
+    window_id: int
+    event_type: str
+    message: str
+    timestamp: datetime
+    extra_data: Optional[Dict[str, Any]] = None
+
+    class Config:
+        from_attributes = True
+
+
+class MaintenanceWindowResponse(BaseModel):
+    id: int
+    target_id: int
+    target_name: Optional[str] = None
+    group_id: Optional[int] = None
+    group_name: Optional[str] = None
+    title: str
+    description: Optional[str] = None
+    start_time: datetime
+    end_time: datetime
+    reason: Optional[str] = None
+    owner: Optional[str] = None
+    status: str
+    is_cancelled: bool
+    cancelled_at: Optional[datetime] = None
+    cancelled_reason: Optional[str] = None
+    actual_start_time: Optional[datetime] = None
+    actual_end_time: Optional[datetime] = None
+    timeout_alert_sent: bool
+    extension_reason: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    events: List[MaintenanceWindowEventResponse] = []
+
+    class Config:
+        from_attributes = True
+
+
+class MaintenanceWindowListResponse(BaseModel):
+    items: List[MaintenanceWindowResponse] = []
+    total: int = 0
+
+
+class MaintenanceWindowCalendarResponse(BaseModel):
+    windows: List[MaintenanceWindowResponse] = []
+    targets: List[Dict[str, Any]] = []

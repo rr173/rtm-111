@@ -16,6 +16,7 @@ import NoiseReductionPage from './components/NoiseReductionPage';
 import AutoDiscoveryPanel from './components/AutoDiscoveryPanel';
 import RecordingControlPanel from './components/RecordingControlPanel';
 import PlaybackControlPanel from './components/PlaybackControlPanel';
+import MaintenanceCalendar from './components/MaintenanceCalendar';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
@@ -43,6 +44,9 @@ function App() {
     playbackStatus,
     playbackFinished,
     setPlaybackFinished,
+    maintenanceWindows,
+    maintenanceTargets,
+    loadMaintenanceData,
   } = useWebSocket();
   const [activeTab, setActiveTab] = useState('list');
   const [expandedTarget, setExpandedTarget] = useState(null);
@@ -264,6 +268,12 @@ function App() {
             🔍 自动发现
           </button>
           <button
+            className={`tab-btn ${activeTab === 'maintenance' ? 'active' : ''}`}
+            onClick={() => setActiveTab('maintenance')}
+          >
+            📅 维护日历
+          </button>
+          <button
             className={`tab-btn ${activeTab === 'replay' ? 'active' : ''}`}
             onClick={() => setActiveTab('replay')}
           >
@@ -368,6 +378,12 @@ function App() {
             />
           ) : activeTab === 'discovery' ? (
             <AutoDiscoveryPanel targets={targets} groups={groups} />
+          ) : activeTab === 'maintenance' ? (
+            <MaintenanceCalendar
+              windows={maintenanceWindows}
+              targets={maintenanceTargets.length > 0 ? maintenanceTargets : targets}
+              onRefresh={loadMaintenanceData}
+            />
           ) : activeTab === 'replay' ? (
             <div className="replay-page">
               <div className="replay-panels">

@@ -16,6 +16,7 @@ from .models import (
     SLOTarget, SLOBudgetSnapshot,
     Incident, IncidentTarget, IncidentAlert, IncidentTimeline, IncidentNote,
     RegistrySource, SyncEvent, SyncEventDetail,
+    MaintenanceWindow, MaintenanceWindowEvent,
 )
 from .schemas import (
     ProbeTargetCreate, ProbeTargetUpdate, ProbeTargetResponse,
@@ -45,6 +46,9 @@ from .schemas import (
     IncidentSLOBudgetRisk,
     RegistrySourceCreate, RegistrySourceUpdate, RegistrySourceResponse,
     SyncEventDetailResponse, SyncEventResponse, SyncEventListResponse,
+    MaintenanceWindowCreate, MaintenanceWindowUpdate, MaintenanceWindowResponse,
+    MaintenanceWindowListResponse, MaintenanceWindowCalendarResponse,
+    MaintenanceWindowExtend, MaintenanceWindowCancel, MaintenanceWindowEventResponse,
 )
 from .observer_engine import observer_engine
 from .probe_engine import probe_engine
@@ -52,6 +56,7 @@ from .sync_engine import sync_engine
 from .websocket_manager import manager, get_target_history
 from .recording_engine import recording_engine
 from .playback_engine import playback_engine
+from .maintenance_engine import maintenance_engine
 from pydantic import BaseModel
 from typing import List as TypingList
 
@@ -805,6 +810,70 @@ def _migrate_database():
                             conn.execute(text(idx_sql))
                     print(f"Created table {table_name}")
 
+            maintenance_tables = {
+                "maintenance_windows": """
+                    CREATE TABLE maintenance_windows (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        target_id INTEGER NOT NULL,
+                        group_id INTEGER,
+                        title VARCHAR(255) NOT NULL,
+                        description TEXT,
+                        start_time DATETIME NOT NULL,
+                        end_time DATETIME NOT NULL,
+                        reason VARCHAR(255),
+                        owner VARCHAR(100),
+                        status VARCHAR(20) DEFAULT 'scheduled',
+                        is_cancelled INTEGER DEFAULT 0,
+                        cancelled_at DATETIME,
+                        cancelled_reason VARCHAR(512),
+                        actual_start_time DATETIME,
+                        actual_end_time DATETIME,
+                        timeout_alert_sent INTEGER DEFAULT 0,
+                        extension_reason TEXT,
+                        created_by VARCHAR(100),
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE CASCADE,
+                        FOREIGN KEY (group_id) REFERENCES probe_groups(id) ON DELETE SET NULL
+                    )
+                """,
+                "maintenance_window_events": """
+                    CREATE TABLE maintenance_window_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        window_id INTEGER NOT NULL,
+                        event_type VARCHAR(30) NOT NULL,
+                        message VARCHAR(512) NOT NULL,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        extra_data TEXT,
+                        FOREIGN KEY (window_id) REFERENCES maintenance_windows(id) ON DELETE CASCADE
+                    )
+                """,
+            }
+
+            for table_name, create_sql in maintenance_tables.items():
+                result = conn.execute(text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"))
+                if not result.fetchone():
+                    conn.execute(text(create_sql))
+                    index_sqls = {
+                        "maintenance_windows": [
+                            "CREATE INDEX idx_mw_target_id ON maintenance_windows(target_id)",
+                            "CREATE INDEX idx_mw_group_id ON maintenance_windows(group_id)",
+                            "CREATE INDEX idx_mw_start_time ON maintenance_windows(start_time)",
+                            "CREATE INDEX idx_mw_end_time ON maintenance_windows(end_time)",
+                            "CREATE INDEX idx_mw_status ON maintenance_windows(status)",
+                            "CREATE INDEX idx_mw_created_at ON maintenance_windows(created_at)",
+                        ],
+                        "maintenance_window_events": [
+                            "CREATE INDEX idx_mwe_window_id ON maintenance_window_events(window_id)",
+                            "CREATE INDEX idx_mwe_timestamp ON maintenance_window_events(timestamp)",
+                            "CREATE INDEX idx_mwe_event_type ON maintenance_window_events(event_type)",
+                        ],
+                    }
+                    if table_name in index_sqls:
+                        for idx_sql in index_sqls[table_name]:
+                            conn.execute(text(idx_sql))
+                    print(f"Created table {table_name}")
+
             conn.commit()
         except Exception as e:
             print(f"Migration error: {e}")
@@ -834,6 +903,7 @@ async def startup_event():
     observer_engine.set_loop(loop)
     recording_engine.set_loop(loop)
     playback_engine.set_loop(loop)
+    maintenance_engine.set_loop(loop)
 
     if os.getenv("RESET_DEMO_DATA", "false").lower() == "true":
         db_path = "./data/probes.db"
@@ -854,9 +924,11 @@ async def startup_event():
     _init_demo_slo()
     _init_demo_incidents()
     incident_engine.attach_callbacks()
+    maintenance_engine.register_status_callback(lambda data: manager.broadcast_maintenance_update())
     await observer_engine.start()
     await probe_engine.start()
     await sync_engine.start()
+    await maintenance_engine.start()
 
 
 @app.on_event("shutdown")
@@ -864,6 +936,7 @@ async def shutdown_event():
     await observer_engine.stop()
     await probe_engine.stop()
     await sync_engine.stop()
+    await maintenance_engine.stop()
 
 
 def _init_demo_slo():
@@ -2989,6 +3062,299 @@ def simulate_cascade(target_id: int, db: Session = Depends(get_db)):
         "affected_target_ids": [t.id for t in downstream],
         "affected_target_names": [t.name for t in downstream]
     }
+
+
+def _enrich_maintenance_window(window: MaintenanceWindow, db: Session = None) -> dict:
+    target_name = None
+    group_name = None
+    if window.target:
+        target_name = window.target.name
+    elif db:
+        target = db.query(ProbeTarget).filter(ProbeTarget.id == window.target_id).first()
+        if target:
+            target_name = target.name
+
+    if window.group:
+        group_name = window.group.name
+    elif window.group_id and db:
+        group = db.query(ProbeGroup).filter(ProbeGroup.id == window.group_id).first()
+        if group:
+            group_name = group.name
+
+    events = []
+    for event in window.events:
+        events.append({
+            "id": event.id,
+            "window_id": event.window_id,
+            "event_type": event.event_type,
+            "message": event.message,
+            "timestamp": event.timestamp.isoformat() if event.timestamp else None,
+            "extra_data": event.extra_data
+        })
+
+    return {
+        "id": window.id,
+        "target_id": window.target_id,
+        "target_name": target_name,
+        "group_id": window.group_id,
+        "group_name": group_name,
+        "title": window.title,
+        "description": window.description,
+        "start_time": window.start_time.isoformat(),
+        "end_time": window.end_time.isoformat(),
+        "reason": window.reason,
+        "owner": window.owner,
+        "status": window.status,
+        "is_cancelled": window.is_cancelled or False,
+        "cancelled_at": window.cancelled_at.isoformat() if window.cancelled_at else None,
+        "cancelled_reason": window.cancelled_reason,
+        "actual_start_time": window.actual_start_time.isoformat() if window.actual_start_time else None,
+        "actual_end_time": window.actual_end_time.isoformat() if window.actual_end_time else None,
+        "timeout_alert_sent": window.timeout_alert_sent or False,
+        "extension_reason": window.extension_reason,
+        "created_by": window.created_by,
+        "created_at": window.created_at.isoformat(),
+        "updated_at": window.updated_at.isoformat(),
+        "events": events
+    }
+
+
+@app.get("/api/maintenance-windows", response_model=MaintenanceWindowListResponse)
+def list_maintenance_windows(
+    target_id: Optional[int] = None,
+    group_id: Optional[int] = None,
+    status: Optional[str] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db)
+):
+    query = db.query(MaintenanceWindow).options(
+        joinedload(MaintenanceWindow.target),
+        joinedload(MaintenanceWindow.group),
+        joinedload(MaintenanceWindow.events)
+    )
+
+    if target_id:
+        query = query.filter(MaintenanceWindow.target_id == target_id)
+    if group_id:
+        query = query.filter(MaintenanceWindow.group_id == group_id)
+    if status:
+        query = query.filter(MaintenanceWindow.status == status)
+    if start_time:
+        query = query.filter(MaintenanceWindow.end_time >= start_time)
+    if end_time:
+        query = query.filter(MaintenanceWindow.start_time <= end_time)
+
+    total = query.count()
+    windows = query.order_by(MaintenanceWindow.start_time.desc()).offset(offset).limit(limit).all()
+
+    items = [_enrich_maintenance_window(w, db) for w in windows]
+    return {"items": items, "total": total}
+
+
+@app.get("/api/maintenance-windows/calendar", response_model=MaintenanceWindowCalendarResponse)
+def get_maintenance_calendar(
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    target_id: Optional[int] = None,
+    group_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    windows = maintenance_engine.get_windows_for_calendar(
+        start_time=start_time,
+        end_time=end_time,
+        target_id=target_id,
+        group_id=group_id
+    )
+
+    targets_query = db.query(ProbeTarget).filter(ProbeTarget.deprecated == False)
+    if group_id:
+        targets_query = targets_query.filter(ProbeTarget.group_id == group_id)
+    targets = targets_query.order_by(ProbeTarget.name).all()
+
+    targets_data = []
+    for t in targets:
+        group_color = t.group.color if t.group else "#3b82f6"
+        targets_data.append({
+            "id": t.id,
+            "name": t.name,
+            "group_id": t.group_id,
+            "group_name": t.group.name if t.group else None,
+            "status": t.status,
+            "paused": t.paused,
+            "color": group_color
+        })
+
+    return {"windows": windows, "targets": targets_data}
+
+
+@app.get("/api/maintenance-windows/{window_id}", response_model=MaintenanceWindowResponse)
+def get_maintenance_window(window_id: int, db: Session = Depends(get_db)):
+    window = db.query(MaintenanceWindow).options(
+        joinedload(MaintenanceWindow.target),
+        joinedload(MaintenanceWindow.group),
+        joinedload(MaintenanceWindow.events)
+    ).filter(MaintenanceWindow.id == window_id).first()
+    if not window:
+        raise HTTPException(status_code=404, detail="Maintenance window not found")
+    return _enrich_maintenance_window(window, db)
+
+
+@app.post("/api/maintenance-windows", response_model=MaintenanceWindowResponse)
+def create_maintenance_window(window_data: MaintenanceWindowCreate, db: Session = Depends(get_db)):
+    target = db.query(ProbeTarget).filter(ProbeTarget.id == window_data.target_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    if window_data.start_time >= window_data.end_time:
+        raise HTTPException(status_code=400, detail="End time must be after start time")
+
+    if maintenance_engine.check_overlap(window_data.target_id, window_data.start_time, window_data.end_time):
+        raise HTTPException(status_code=409, detail="Maintenance window overlaps with an existing window for this target")
+
+    group_id = target.group_id
+
+    window = MaintenanceWindow(
+        target_id=window_data.target_id,
+        group_id=group_id,
+        title=window_data.title,
+        description=window_data.description,
+        start_time=window_data.start_time,
+        end_time=window_data.end_time,
+        reason=window_data.reason,
+        owner=window_data.owner,
+        created_by=window_data.created_by,
+        status="scheduled"
+    )
+    db.add(window)
+    db.flush()
+
+    event = MaintenanceWindowEvent(
+        window_id=window.id,
+        event_type="created",
+        message=f"维护窗口已创建：{window.title}"
+    )
+    db.add(event)
+
+    db.commit()
+    db.refresh(window)
+
+    manager.broadcast_maintenance_update()
+
+    return _enrich_maintenance_window(window, db)
+
+
+@app.put("/api/maintenance-windows/{window_id}", response_model=MaintenanceWindowResponse)
+def update_maintenance_window(window_id: int, window_data: MaintenanceWindowUpdate, db: Session = Depends(get_db)):
+    window = db.query(MaintenanceWindow).filter(MaintenanceWindow.id == window_id).first()
+    if not window:
+        raise HTTPException(status_code=404, detail="Maintenance window not found")
+
+    if window.status == "completed" or window.is_cancelled:
+        raise HTTPException(status_code=400, detail="Cannot update completed or cancelled window")
+
+    new_start = window_data.start_time if window_data.start_time is not None else window.start_time
+    new_end = window_data.end_time if window_data.end_time is not None else window.end_time
+
+    if new_start >= new_end:
+        raise HTTPException(status_code=400, detail="End time must be after start time")
+
+    if maintenance_engine.check_overlap(window.target_id, new_start, new_end, exclude_window_id=window_id):
+        raise HTTPException(status_code=409, detail="Maintenance window overlaps with an existing window for this target")
+
+    if window_data.title is not None:
+        window.title = window_data.title
+    if window_data.description is not None:
+        window.description = window_data.description
+    if window_data.start_time is not None:
+        window.start_time = window_data.start_time
+    if window_data.end_time is not None:
+        window.end_time = window_data.end_time
+    if window_data.reason is not None:
+        window.reason = window_data.reason
+    if window_data.owner is not None:
+        window.owner = window_data.owner
+
+    db.commit()
+    db.refresh(window)
+
+    manager.broadcast_maintenance_update()
+
+    return _enrich_maintenance_window(window, db)
+
+
+@app.post("/api/maintenance-windows/{window_id}/extend", response_model=MaintenanceWindowResponse)
+def extend_maintenance_window(window_id: int, extend_data: MaintenanceWindowExtend, db: Session = Depends(get_db)):
+    window = db.query(MaintenanceWindow).filter(MaintenanceWindow.id == window_id).first()
+    if not window:
+        raise HTTPException(status_code=404, detail="Maintenance window not found")
+
+    if window.status == "completed" or window.is_cancelled:
+        raise HTTPException(status_code=400, detail="Cannot extend completed or cancelled window")
+
+    if extend_data.end_time <= window.end_time:
+        raise HTTPException(status_code=400, detail="New end time must be after current end time")
+
+    success = maintenance_engine.extend_window(window_id, extend_data.end_time, extend_data.extension_reason)
+    if not success:
+        raise HTTPException(status_code=400, detail="Failed to extend maintenance window")
+
+    db.refresh(window)
+    manager.broadcast_maintenance_update()
+
+    return _enrich_maintenance_window(window, db)
+
+
+@app.post("/api/maintenance-windows/{window_id}/cancel", response_model=MaintenanceWindowResponse)
+def cancel_maintenance_window(window_id: int, cancel_data: MaintenanceWindowCancel, db: Session = Depends(get_db)):
+    window = db.query(MaintenanceWindow).filter(MaintenanceWindow.id == window_id).first()
+    if not window:
+        raise HTTPException(status_code=404, detail="Maintenance window not found")
+
+    success = maintenance_engine.cancel_window(window_id, cancel_data.cancelled_reason)
+    if not success:
+        raise HTTPException(status_code=400, detail="Failed to cancel maintenance window")
+
+    db.refresh(window)
+    manager.broadcast_maintenance_update()
+
+    return _enrich_maintenance_window(window, db)
+
+
+@app.delete("/api/maintenance-windows/{window_id}")
+def delete_maintenance_window(window_id: int, db: Session = Depends(get_db)):
+    window = db.query(MaintenanceWindow).filter(MaintenanceWindow.id == window_id).first()
+    if not window:
+        raise HTTPException(status_code=404, detail="Maintenance window not found")
+
+    if window.status == "active":
+        target = db.query(ProbeTarget).filter(ProbeTarget.id == window.target_id).first()
+        if target:
+            target.paused = False
+            target.silenced = False
+            probe_engine.toggle_target(target.id, False)
+
+    db.delete(window)
+    db.commit()
+
+    manager.broadcast_maintenance_update()
+
+    return {"message": "Maintenance window deleted"}
+
+
+@app.get("/api/maintenance-windows/{window_id}/events", response_model=List[MaintenanceWindowEventResponse])
+def get_maintenance_window_events(window_id: int, db: Session = Depends(get_db)):
+    window = db.query(MaintenanceWindow).filter(MaintenanceWindow.id == window_id).first()
+    if not window:
+        raise HTTPException(status_code=404, detail="Maintenance window not found")
+
+    events = db.query(MaintenanceWindowEvent).filter(
+        MaintenanceWindowEvent.window_id == window_id
+    ).order_by(MaintenanceWindowEvent.timestamp.asc()).all()
+
+    return events
 
 
 @app.websocket("/api/ws")

@@ -593,3 +593,45 @@ class PlaybackSnapshot(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("RecordingSession", back_populates="pre_playback_snapshot", foreign_keys=[session_id])
+
+
+class MaintenanceWindow(Base):
+    __tablename__ = "maintenance_windows"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False, index=True)
+    group_id = Column(Integer, ForeignKey("probe_groups.id"), nullable=True, index=True)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    start_time = Column(DateTime, nullable=False, index=True)
+    end_time = Column(DateTime, nullable=False, index=True)
+    reason = Column(String(255), nullable=True)
+    owner = Column(String(100), nullable=True)
+    status = Column(String(20), default="scheduled", index=True)
+    is_cancelled = Column(Boolean, default=False)
+    cancelled_at = Column(DateTime, nullable=True)
+    cancelled_reason = Column(String(512), nullable=True)
+    actual_start_time = Column(DateTime, nullable=True)
+    actual_end_time = Column(DateTime, nullable=True)
+    timeout_alert_sent = Column(Boolean, default=False)
+    extension_reason = Column(Text, nullable=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    target = relationship("ProbeTarget", backref="maintenance_windows")
+    group = relationship("ProbeGroup", backref="maintenance_windows")
+    events = relationship("MaintenanceWindowEvent", back_populates="window", cascade="all, delete-orphan")
+
+
+class MaintenanceWindowEvent(Base):
+    __tablename__ = "maintenance_window_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    window_id = Column(Integer, ForeignKey("maintenance_windows.id"), nullable=False, index=True)
+    event_type = Column(String(30), nullable=False)
+    message = Column(String(512), nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    extra_data = Column(JSON, nullable=True)
+
+    window = relationship("MaintenanceWindow", back_populates="events")

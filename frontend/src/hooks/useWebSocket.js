@@ -40,6 +40,8 @@ export function useWebSocket() {
   const [recordingStatus, setRecordingStatus] = useState({ is_recording: false, session_id: null });
   const [playbackStatus, setPlaybackStatus] = useState({ is_playing: false, is_paused: false, session_id: null, progress: 0 });
   const [playbackFinished, setPlaybackFinished] = useState(null);
+  const [maintenanceWindows, setMaintenanceWindows] = useState([]);
+  const [maintenanceTargets, setMaintenanceTargets] = useState([]);
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const resultsRef = useRef({});
@@ -96,6 +98,17 @@ export function useWebSocket() {
         }
       } catch (e) {
         console.error('Failed to load incidents:', e);
+      }
+
+      try {
+        const maintenanceRes = await fetch(`${apiBase}/api/maintenance-windows/calendar`);
+        if (maintenanceRes.ok) {
+          const maintenanceData = await maintenanceRes.json();
+          setMaintenanceWindows(maintenanceData.windows || []);
+          setMaintenanceTargets(maintenanceData.targets || []);
+        }
+      } catch (e) {
+        console.error('Failed to load maintenance windows:', e);
       }
     } catch (e) {
       console.error('Failed to load initial data:', e);
@@ -255,6 +268,9 @@ export function useWebSocket() {
             timestamp: Date.now(),
           });
           setPlaybackStatus({ is_playing: false, is_paused: false, session_id: null, progress: 0 });
+        } else if (data.type === 'maintenance_update') {
+          setMaintenanceWindows(data.windows || []);
+          setMaintenanceTargets(data.targets || []);
         }
       };
 
@@ -341,6 +357,28 @@ export function useWebSocket() {
     setIncidents(newIncidents);
   }, []);
 
+  const setMaintenanceWindowsData = useCallback((newWindows) => {
+    setMaintenanceWindows(newWindows);
+  }, []);
+
+  const setMaintenanceTargetsData = useCallback((newTargets) => {
+    setMaintenanceTargets(newTargets);
+  }, []);
+
+  const loadMaintenanceData = useCallback(async () => {
+    try {
+      const apiBase = import.meta.env.VITE_API_HTTP_URL || '';
+      const res = await fetch(`${apiBase}/api/maintenance-windows/calendar`);
+      if (res.ok) {
+        const data = await res.json();
+        setMaintenanceWindows(data.windows || []);
+        setMaintenanceTargets(data.targets || []);
+      }
+    } catch (e) {
+      console.error('Failed to load maintenance data:', e);
+    }
+  }, []);
+
   return {
     connected,
     targets,
@@ -357,6 +395,8 @@ export function useWebSocket() {
     recordingStatus,
     playbackStatus,
     playbackFinished,
+    maintenanceWindows,
+    maintenanceTargets,
     getResults,
     getRoundResults,
     setTargets: setTargetsData,
@@ -368,7 +408,10 @@ export function useWebSocket() {
     setActiveChanges: setActiveChangesData,
     setTargetChangesMap: setTargetChangesMapData,
     setIncidents: setIncidentsData,
+    setMaintenanceWindows: setMaintenanceWindowsData,
+    setMaintenanceTargets: setMaintenanceTargetsData,
     setPlaybackFinished,
-    loadInitialData
+    loadInitialData,
+    loadMaintenanceData,
   };
 }

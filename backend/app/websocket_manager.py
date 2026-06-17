@@ -453,6 +453,44 @@ class ConnectionManager:
         finally:
             db.close()
 
+    def broadcast_maintenance_update(self):
+        from .maintenance_engine import maintenance_engine
+        from .models import ProbeTarget, ProbeGroup
+        from sqlalchemy.orm import joinedload
+        db = SessionLocal()
+        try:
+            from datetime import datetime, timedelta
+            now = datetime.utcnow()
+            start_time = now - timedelta(days=7)
+            end_time = now + timedelta(days=30)
+
+            windows = maintenance_engine.get_windows_for_calendar(
+                start_time=start_time,
+                end_time=end_time
+            )
+
+            targets = db.query(ProbeTarget).filter(ProbeTarget.deprecated == False).all()
+            targets_data = []
+            for t in targets:
+                group_color = t.group.color if t.group else "#3b82f6"
+                targets_data.append({
+                    "id": t.id,
+                    "name": t.name,
+                    "group_id": t.group_id,
+                    "group_name": t.group.name if t.group else None,
+                    "status": t.status,
+                    "paused": t.paused,
+                    "color": group_color
+                })
+
+            self._safe_broadcast({
+                "type": "maintenance_update",
+                "windows": windows,
+                "targets": targets_data
+            })
+        finally:
+            db.close()
+
     async def _broadcast(self, message: dict):
         dead_connections = []
         for connection in list(self.active_connections):
