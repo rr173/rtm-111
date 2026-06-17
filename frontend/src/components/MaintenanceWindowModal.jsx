@@ -2,9 +2,10 @@ import { useState, useEffect } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
-function MaintenanceWindowModal({ onClose, onSubmit, targets, initialData = null }) {
+function MaintenanceWindowModal({ onClose, onSubmit, targets, groups = [], initialData = null }) {
   const [formData, setFormData] = useState({
     target_id: '',
+    group_id: '',
     title: '',
     description: '',
     start_time: '',
@@ -14,11 +15,13 @@ function MaintenanceWindowModal({ onClose, onSubmit, targets, initialData = null
   });
   const [errors, setErrors] = useState({});
   const [submitting, setSubmitting] = useState(false);
+  const [selectType, setSelectType] = useState('target');
 
   useEffect(() => {
     if (initialData) {
       setFormData({
         target_id: initialData.target_id || '',
+        group_id: initialData.group_id || '',
         title: initialData.title || '',
         description: initialData.description || '',
         start_time: formatDateTimeLocal(initialData.start_time),
@@ -26,6 +29,7 @@ function MaintenanceWindowModal({ onClose, onSubmit, targets, initialData = null
         reason: initialData.reason || '',
         owner: initialData.owner || '',
       });
+      setSelectType(initialData.group_id ? 'group' : 'target');
     }
   }, [initialData]);
 
@@ -48,9 +52,24 @@ function MaintenanceWindowModal({ onClose, onSubmit, targets, initialData = null
     }
   };
 
+  const handleSelectTypeChange = (type) => {
+    setSelectType(type);
+    setFormData(prev => ({
+      ...prev,
+      target_id: type === 'target' ? prev.target_id : '',
+      group_id: type === 'group' ? prev.group_id : '',
+    }));
+    setErrors(prev => ({ ...prev, target_id: '', group_id: '' }));
+  };
+
   const validate = () => {
     const newErrors = {};
-    if (!formData.target_id) newErrors.target_id = '请选择目标';
+    if (selectType === 'target' && !formData.target_id) {
+      newErrors.target_id = '请选择目标';
+    }
+    if (selectType === 'group' && !formData.group_id) {
+      newErrors.group_id = '请选择分组';
+    }
     if (!formData.title.trim()) newErrors.title = '请输入标题';
     if (!formData.start_time) newErrors.start_time = '请选择开始时间';
     if (!formData.end_time) newErrors.end_time = '请选择结束时间';
@@ -70,7 +89,8 @@ function MaintenanceWindowModal({ onClose, onSubmit, targets, initialData = null
     try {
       const payload = {
         ...formData,
-        target_id: parseInt(formData.target_id),
+        target_id: selectType === 'target' ? parseInt(formData.target_id) : null,
+        group_id: selectType === 'group' ? parseInt(formData.group_id) : null,
         start_time: new Date(formData.start_time).toISOString(),
         end_time: new Date(formData.end_time).toISOString(),
         created_by: formData.owner || 'unknown',
@@ -124,19 +144,59 @@ function MaintenanceWindowModal({ onClose, onSubmit, targets, initialData = null
           )}
 
           <div className="form-group">
-            <label>探测目标 *</label>
-            <select
-              name="target_id"
-              value={formData.target_id}
-              onChange={handleChange}
-              disabled={!!initialData}
-            >
-              <option value="">请选择目标</option>
-              {targets.map(t => (
-                <option key={t.id} value={t.id}>{t.name}</option>
-              ))}
-            </select>
-            {errors.target_id && <span className="field-error">{errors.target_id}</span>}
+            <label>维护范围 *</label>
+            <div className="view-toggle" style={{ marginBottom: '12px' }}>
+              <button
+                type="button"
+                className={`view-btn ${selectType === 'target' ? 'active' : ''}`}
+                onClick={() => handleSelectTypeChange('target')}
+                disabled={!!initialData}
+              >
+                单个目标
+              </button>
+              <button
+                type="button"
+                className={`view-btn ${selectType === 'group' ? 'active' : ''}`}
+                onClick={() => handleSelectTypeChange('group')}
+                disabled={!!initialData}
+              >
+                全部分组
+              </button>
+            </div>
+
+            {selectType === 'target' && (
+              <div>
+                <select
+                  name="target_id"
+                  value={formData.target_id}
+                  onChange={handleChange}
+                  disabled={!!initialData}
+                >
+                  <option value="">请选择目标</option>
+                  {targets.map(t => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+                {errors.target_id && <span className="field-error">{errors.target_id}</span>}
+              </div>
+            )}
+
+            {selectType === 'group' && (
+              <div>
+                <select
+                  name="group_id"
+                  value={formData.group_id}
+                  onChange={handleChange}
+                  disabled={!!initialData}
+                >
+                  <option value="">请选择分组</option>
+                  {groups.map(g => (
+                    <option key={g.id} value={g.id}>{g.name}</option>
+                  ))}
+                </select>
+                {errors.group_id && <span className="field-error">{errors.group_id}</span>}
+              </div>
+            )}
           </div>
 
           <div className="form-group">

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -1073,7 +1073,8 @@ class SyncEventListResponse(BaseModel):
 
 
 class MaintenanceWindowCreate(BaseModel):
-    target_id: int
+    target_id: Optional[int] = None
+    group_id: Optional[int] = None
     title: str
     description: Optional[str] = None
     start_time: datetime
@@ -1081,6 +1082,14 @@ class MaintenanceWindowCreate(BaseModel):
     reason: Optional[str] = None
     owner: Optional[str] = None
     created_by: Optional[str] = None
+
+    @model_validator(mode='after')
+    def check_target_or_group(self):
+        if self.target_id is None and self.group_id is None:
+            raise ValueError('必须指定 target_id 或 group_id 其中之一')
+        if self.target_id is not None and self.group_id is not None:
+            raise ValueError('不能同时指定 target_id 和 group_id')
+        return self
 
 
 class MaintenanceWindowUpdate(BaseModel):
@@ -1095,6 +1104,13 @@ class MaintenanceWindowUpdate(BaseModel):
 class MaintenanceWindowExtend(BaseModel):
     end_time: datetime
     extension_reason: str
+
+    @field_validator('extension_reason')
+    @classmethod
+    def extension_reason_not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError('延期原因不能为空')
+        return v.strip()
 
 
 class MaintenanceWindowCancel(BaseModel):

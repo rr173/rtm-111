@@ -3204,20 +3204,48 @@ def get_maintenance_window(window_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/maintenance-windows", response_model=MaintenanceWindowResponse)
 def create_maintenance_window(window_data: MaintenanceWindowCreate, db: Session = Depends(get_db)):
-    target = db.query(ProbeTarget).filter(ProbeTarget.id == window_data.target_id).first()
-    if not target:
-        raise HTTPException(status_code=404, detail="Target not found")
-
     if window_data.start_time >= window_data.end_time:
         raise HTTPException(status_code=400, detail="End time must be after start time")
 
-    if maintenance_engine.check_overlap(window_data.target_id, window_data.start_time, window_data.end_time):
-        raise HTTPException(status_code=409, detail="Maintenance window overlaps with an existing window for this target")
+    target_id = None
+    group_id = None
+    target = None
 
-    group_id = target.group_id
+    if window_data.group_id is not None:
+        group = db.query(ProbeGroup).filter(ProbeGroup.id == window_data.group_id).first()
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+
+        group_targets = db.query(ProbeTarget).filter(ProbeTarget.group_id == window_data.group_id).all()
+        if not group_targets:
+            raise HTTPException(status_code=400, detail="Group has no targets")
+
+        target = group_targets[0]
+        target_id = target.id
+        group_id = window_data.group_id
+
+        if maintenance_engine.check_overlap(target_id, window_data.start_time, window_data.end_time,
+                                            group_id=group_id):
+            raise HTTPException(status_code=409,
+                                detail="Maintenance window overlaps with an existing window for targets in this group")
+
+        event_msg = f"分组级维护窗口已创建：{window.title}，分组 [{group.name}] 包含 {len(group_targets)} 个目标"
+    else:
+        target = db.query(ProbeTarget).filter(ProbeTarget.id == window_data.target_id).first()
+        if not target:
+            raise HTTPException(status_code=404, detail="Target not found")
+
+        target_id = target.id
+        group_id = target.group_id
+
+        if maintenance_engine.check_overlap(target_id, window_data.start_time, window_data.end_time):
+            raise HTTPException(status_code=409,
+                                detail="Maintenance window overlaps with an existing window for this target")
+
+        event_msg = f"维护窗口已创建：{window.title}，目标 [{target.name}]"
 
     window = MaintenanceWindow(
-        target_id=window_data.target_id,
+        target_id=target_id,
         group_id=group_id,
         title=window_data.title,
         description=window_data.description,
@@ -3234,7 +3262,7 @@ def create_maintenance_window(window_data: MaintenanceWindowCreate, db: Session 
     event = MaintenanceWindowEvent(
         window_id=window.id,
         event_type="created",
-        message=f"维护窗口已创建：{window.title}"
+        message=event_msg
     )
     db.add(event)
 
@@ -3261,8 +3289,9 @@ def update_maintenance_window(window_id: int, window_data: MaintenanceWindowUpda
     if new_start >= new_end:
         raise HTTPException(status_code=400, detail="End time must be after start time")
 
-    if maintenance_engine.check_overlap(window.target_id, new_start, new_end, exclude_window_id=window_id):
-        raise HTTPException(status_code=409, detail="Maintenance window overlaps with an existing window for this target")
+    if maintenance_engine.check_overlap(window.target_id, new_start, new_end,
+                                        exclude_window_id=window_id, group_id=window.group_id):
+        raise HTTPException(status_code=409, detail="Maintenance window overlaps with an existing window")
 
     if window_data.title is not None:
         window.title = window_data.title

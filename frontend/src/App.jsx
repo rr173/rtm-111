@@ -382,6 +382,7 @@ function App() {
             <MaintenanceCalendar
               windows={maintenanceWindows}
               targets={maintenanceTargets.length > 0 ? maintenanceTargets : targets}
+              groups={groups}
               onRefresh={loadMaintenanceData}
             />
           ) : activeTab === 'replay' ? (

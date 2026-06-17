@@ -104,79 +104,121 @@ class MaintenanceEngine:
         finally:
             db.close()
 
+    def _get_targets_for_window(self, db: Session, window: MaintenanceWindow) -> List[ProbeTarget]:
+        if window.group_id:
+            return db.query(ProbeTarget).filter(ProbeTarget.group_id == window.group_id).all()
+        else:
+            target = db.query(ProbeTarget).filter(ProbeTarget.id == window.target_id).first()
+            return [target] if target else []
+
     def _start_maintenance(self, db: Session, window: MaintenanceWindow):
-        target = db.query(ProbeTarget).filter(ProbeTarget.id == window.target_id).first()
-        if not target:
+        targets = self._get_targets_for_window(db, window)
+        if not targets:
             return
 
         window.status = "active"
         window.actual_start_time = datetime.utcnow()
 
-        target.paused = True
-        target.silenced = True
-
-        self._add_event(db, window.id, "started", f"维护窗口已开始，目标 {target.name} 已暂停探测并抑制告警")
-
         from .probe_engine import probe_engine
-        probe_engine.toggle_target(target.id, True)
 
-        self._notify_status_change(window, target, "started")
+        target_names = []
+        for target in targets:
+            target.paused = True
+            target.silenced = True
+            probe_engine.toggle_target(target.id, True)
+            target_names.append(target.name)
+
+        target_str = ", ".join(target_names)
+        if window.group_id:
+            group = db.query(ProbeGroup).filter(ProbeGroup.id == window.group_id).first()
+            group_name = group.name if group else "未知分组"
+            self._add_event(db, window.id, "started",
+                           f"维护窗口已开始，分组 [{group_name}] 下的 {len(targets)} 个目标已暂停探测并抑制告警：{target_str}")
+        else:
+            self._add_event(db, window.id, "started",
+                           f"维护窗口已开始，目标 {target_str} 已暂停探测并抑制告警")
+
+        self._notify_status_change(window, targets[0], "started")
 
     def _end_maintenance(self, db: Session, window: MaintenanceWindow):
-        target = db.query(ProbeTarget).filter(ProbeTarget.id == window.target_id).first()
-        if not target:
+        targets = self._get_targets_for_window(db, window)
+        if not targets:
             return
 
         window.status = "completed"
         window.actual_end_time = datetime.utcnow()
 
-        target.paused = False
-        target.silenced = False
-
-        self._add_event(db, window.id, "completed", f"维护窗口已结束，目标 {target.name} 已恢复探测")
-
         from .probe_engine import probe_engine
-        probe_engine.toggle_target(target.id, False)
 
-        self._notify_status_change(window, target, "completed")
+        target_names = []
+        for target in targets:
+            target.paused = False
+            target.silenced = False
+            probe_engine.toggle_target(target.id, False)
+            target_names.append(target.name)
+
+        target_str = ", ".join(target_names)
+        if window.group_id:
+            group = db.query(ProbeGroup).filter(ProbeGroup.id == window.group_id).first()
+            group_name = group.name if group else "未知分组"
+            self._add_event(db, window.id, "completed",
+                           f"维护窗口已结束，分组 [{group_name}] 下的 {len(targets)} 个目标已恢复探测：{target_str}")
+        else:
+            self._add_event(db, window.id, "completed",
+                           f"维护窗口已结束，目标 {target_str} 已恢复探测")
+
+        self._notify_status_change(window, targets[0], "completed")
 
     def _send_timeout_alert(self, db: Session, window: MaintenanceWindow):
-        target = db.query(ProbeTarget).filter(ProbeTarget.id == window.target_id).first()
-        if not target:
+        targets = self._get_targets_for_window(db, window)
+        if not targets:
             return
 
         window.timeout_alert_sent = True
 
-        alert = Alert(
-            target_id=window.target_id,
-            timestamp=datetime.utcnow(),
-            from_status="maintenance",
-            to_status="maintenance_timeout",
-            acknowledged=False
-        )
-        db.add(alert)
-        db.flush()
+        from .probe_engine import probe_engine
 
-        self._add_event(db, window.id, "timeout", f"维护窗口已超时，超过计划结束时间仍未手动确认完成")
+        target_names = []
+        for target in targets:
+            alert = Alert(
+                target_id=target.id,
+                timestamp=datetime.utcnow(),
+                from_status="maintenance",
+                to_status="maintenance_timeout",
+                acknowledged=False
+            )
+            db.add(alert)
+            db.flush()
+            target_names.append(target.name)
 
-        alert_data = {
-            "id": alert.id,
-            "target_id": alert.target_id,
-            "target_name": target.name,
-            "timestamp": alert.timestamp.isoformat(),
-            "from_status": alert.from_status,
-            "to_status": alert.to_status,
-            "acknowledged": alert.acknowledged,
-            "window_id": window.id,
-            "window_title": window.title,
-            "owner": window.owner
-        }
+            alert_data = {
+                "id": alert.id,
+                "target_id": alert.target_id,
+                "target_name": target.name,
+                "timestamp": alert.timestamp.isoformat(),
+                "from_status": alert.from_status,
+                "to_status": alert.to_status,
+                "acknowledged": alert.acknowledged,
+                "window_id": window.id,
+                "window_title": window.title,
+                "owner": window.owner
+            }
 
-        for callback in self._alert_callbacks:
-            try:
-                callback({"type": "maintenance_timeout", "alert": alert_data, "window": self._window_to_dict(window, target)})
-            except Exception as e:
-                print(f"Maintenance alert callback error: {e}")
+            for callback in self._alert_callbacks:
+                try:
+                    callback({"type": "maintenance_timeout", "alert": alert_data, "window": self._window_to_dict(window, target)})
+                except Exception as e:
+                    print(f"Maintenance alert callback error: {e}")
+
+        target_str = ", ".join(target_names)
+        if window.group_id:
+            group = db.query(ProbeGroup).filter(ProbeGroup.id == window.group_id).first()
+            group_name = group.name if group else "未知分组"
+            self._add_event(db, window.id, "timeout",
+                           f"维护窗口已超时，分组 [{group_name}] 下的 {len(targets)} 个目标超过计划结束时间仍未手动确认完成：{target_str}")
+        else:
+            self._add_event(db, window.id, "timeout",
+                           f"维护窗口已超时，目标 {target_str} 超过计划结束时间仍未手动确认完成")
 
     def _add_event(self, db: Session, window_id: int, event_type: str, message: str, extra_data: dict = None):
         event = MaintenanceWindowEvent(
@@ -230,12 +272,18 @@ class MaintenanceEngine:
             except Exception as e:
                 print(f"Maintenance broadcast error: {e}")
 
-    def check_overlap(self, target_id: int, start_time: datetime, end_time: datetime, exclude_window_id: int = None) -> bool:
+    def check_overlap(self, target_id: int, start_time: datetime, end_time: datetime,
+                      exclude_window_id: int = None, group_id: int = None) -> bool:
         db = SessionLocal()
         try:
+            target_ids = [target_id]
+            if group_id:
+                group_targets = db.query(ProbeTarget).filter(ProbeTarget.group_id == group_id).all()
+                target_ids = [t.id for t in group_targets]
+
             query = db.query(MaintenanceWindow).filter(
                 and_(
-                    MaintenanceWindow.target_id == target_id,
+                    MaintenanceWindow.target_id.in_(target_ids),
                     MaintenanceWindow.is_cancelled == False,
                     MaintenanceWindow.status.in_(["scheduled", "active"]),
                     or_(
@@ -272,13 +320,13 @@ class MaintenanceEngine:
             if window.status == "completed" or window.is_cancelled:
                 return False
 
-            target = db.query(ProbeTarget).filter(ProbeTarget.id == window.target_id).first()
+            targets = self._get_targets_for_window(db, window)
 
             if window.status == "active":
-                if target:
+                from .probe_engine import probe_engine
+                for target in targets:
                     target.paused = False
                     target.silenced = False
-                    from .probe_engine import probe_engine
                     probe_engine.toggle_target(target.id, False)
 
             window.is_cancelled = True
@@ -286,7 +334,15 @@ class MaintenanceEngine:
             window.cancelled_reason = cancelled_reason
             window.status = "cancelled"
 
-            self._add_event(db, window_id, "cancelled", f"维护窗口已取消：{cancelled_reason or '未提供原因'}")
+            if window.group_id:
+                group = db.query(ProbeGroup).filter(ProbeGroup.id == window.group_id).first()
+                group_name = group.name if group else "未知分组"
+                self._add_event(db, window_id, "cancelled",
+                               f"分组 [{group_name}] 维护窗口已取消：{cancelled_reason or '未提供原因'}")
+            else:
+                target_name = targets[0].name if targets else "未知目标"
+                self._add_event(db, window_id, "cancelled",
+                               f"目标 [{target_name}] 维护窗口已取消：{cancelled_reason or '未提供原因'}")
 
             db.commit()
             self._broadcast_update()
@@ -299,6 +355,10 @@ class MaintenanceEngine:
             db.close()
 
     def extend_window(self, window_id: int, new_end_time: datetime, extension_reason: str) -> bool:
+        if not extension_reason or not extension_reason.strip():
+            print("Extend maintenance window error: extension_reason is required")
+            return False
+
         db = SessionLocal()
         try:
             window = db.query(MaintenanceWindow).filter(MaintenanceWindow.id == window_id).first()
@@ -314,17 +374,25 @@ class MaintenanceEngine:
             if new_end_time <= window.end_time:
                 return False
 
-            if self.check_overlap(window.target_id, window.start_time, new_end_time, exclude_window_id=window_id):
+            if self.check_overlap(window.target_id, window.start_time, new_end_time,
+                                  exclude_window_id=window_id, group_id=window.group_id):
                 return False
 
             old_end_time = window.end_time
             window.end_time = new_end_time
-            window.extension_reason = extension_reason
+            window.extension_reason = extension_reason.strip()
             window.timeout_alert_sent = False
 
-            self._add_event(db, window_id, "extended",
-                           f"维护窗口已延期：从 {old_end_time.isoformat()} 延期至 {new_end_time.isoformat()}，原因：{extension_reason}",
-                           {"old_end_time": old_end_time.isoformat(), "new_end_time": new_end_time.isoformat()})
+            if window.group_id:
+                group = db.query(ProbeGroup).filter(ProbeGroup.id == window.group_id).first()
+                group_name = group.name if group else "未知分组"
+                self._add_event(db, window_id, "extended",
+                               f"分组 [{group_name}] 维护窗口已延期：从 {old_end_time.isoformat()} 延期至 {new_end_time.isoformat()}，原因：{extension_reason}",
+                               {"old_end_time": old_end_time.isoformat(), "new_end_time": new_end_time.isoformat()})
+            else:
+                self._add_event(db, window_id, "extended",
+                               f"维护窗口已延期：从 {old_end_time.isoformat()} 延期至 {new_end_time.isoformat()}，原因：{extension_reason}",
+                               {"old_end_time": old_end_time.isoformat(), "new_end_time": new_end_time.isoformat()})
 
             db.commit()
             self._broadcast_update()

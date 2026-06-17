@@ -18,7 +18,7 @@ const STATUS_LABELS = {
   cancelled: '已取消',
 };
 
-function MaintenanceCalendar({ windows = [], targets = [], onRefresh }) {
+function MaintenanceCalendar({ windows = [], targets = [], groups = [], onRefresh }) {
   const [viewMode, setViewMode] = useState('week');
   const [currentDate, setCurrentDate] = useState(new Date());
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -118,7 +118,7 @@ function MaintenanceCalendar({ windows = [], targets = [], onRefresh }) {
   };
 
   const handleExtend = async () => {
-    if (!selectedWindow || !extendEndTime || !extendReason) return;
+    if (!selectedWindow || !extendEndTime || !extendReason.trim()) return;
     
     setActionLoading(true);
     try {
@@ -381,6 +381,7 @@ function MaintenanceCalendar({ windows = [], targets = [], onRefresh }) {
           onClose={() => setShowCreateModal(false)}
           onSubmit={() => onRefresh && onRefresh()}
           targets={targets}
+          groups={groups}
         />
       )}
 
