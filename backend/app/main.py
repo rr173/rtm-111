@@ -3229,7 +3229,7 @@ def create_maintenance_window(window_data: MaintenanceWindowCreate, db: Session 
             raise HTTPException(status_code=409,
                                 detail="Maintenance window overlaps with an existing window for targets in this group")
 
-        event_msg = f"分组级维护窗口已创建：{window.title}，分组 [{group.name}] 包含 {len(group_targets)} 个目标"
+        event_msg = f"分组级维护窗口已创建：{window_data.title}，分组 [{group.name}] 包含 {len(group_targets)} 个目标"
     else:
         target = db.query(ProbeTarget).filter(ProbeTarget.id == window_data.target_id).first()
         if not target:
@@ -3242,7 +3242,7 @@ def create_maintenance_window(window_data: MaintenanceWindowCreate, db: Session 
             raise HTTPException(status_code=409,
                                 detail="Maintenance window overlaps with an existing window for this target")
 
-        event_msg = f"维护窗口已创建：{window.title}，目标 [{target.name}]"
+        event_msg = f"维护窗口已创建：{window_data.title}，目标 [{target.name}]"
 
     window = MaintenanceWindow(
         target_id=target_id,
