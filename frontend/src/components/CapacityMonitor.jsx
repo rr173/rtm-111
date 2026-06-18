@@ -31,7 +31,7 @@ function WaterLevelBar({ value, status }) {
   );
 }
 
-function TrendChart({ trend, predictionPoints, expansionPlan }) {
+function TrendChart({ trend, predictionPoints, expansionPlan, baselineBand }) {
   if (!trend || trend.length === 0) {
     return <div className="capacity-empty">暂无趋势数据</div>;
   }
@@ -44,9 +44,12 @@ function TrendChart({ trend, predictionPoints, expansionPlan }) {
   const totalLen = allPoints.length + predPoints.length;
   if (totalLen < 2) return null;
 
+  const baselineData = baselineBand || [];
+
   const maxVal = Math.max(
     ...allPoints.map(p => p.overall_utilization),
     ...predPoints.map(p => p.overall_utilization),
+    ...baselineData.map(b => b.upper_bound || 0),
     100
   );
   const yMax = Math.max(maxVal * 1.2, 110);
@@ -59,6 +62,7 @@ function TrendChart({ trend, predictionPoints, expansionPlan }) {
     y: getY(p.overall_utilization),
     val: p.overall_utilization,
     ts: p.hour,
+    idx: i,
   }));
 
   const predPts = predPoints.map((p, i) => ({
@@ -81,12 +85,62 @@ function TrendChart({ trend, predictionPoints, expansionPlan }) {
     ? getX(allPoints.length - 1 + (new Date(expansionPlan.planned_expansion_at) - new Date(allPoints[allPoints.length - 1].ts)) / 3600000)
     : null;
 
+  const bandPts = baselineData.slice(0, allPoints.length).map((b, i) => ({
+    x: getX(i),
+    lower: getY(b.lower_bound || b.baseline_lower || 0),
+    upper: getY(b.upper_bound || b.baseline_upper || 0),
+    mean: getY(b.baseline_mean || 0),
+  }));
+
+  let baselineBandPath = '';
+  let baselineMeanPath = '';
+  if (bandPts.length >= 2) {
+    const upperPart = bandPts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.upper}`).join(' ');
+    const lowerPart = bandPts.slice().reverse().map(p => `L${p.x},${p.lower}`).join(' ');
+    baselineBandPath = `${upperPart} ${lowerPart} Z`;
+    baselineMeanPath = bandPts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.mean}`).join(' ');
+  }
+
+  const anomalySegments = [];
+  if (baselineData.length >= 2) {
+    let currentAnomaly = null;
+    for (let i = 0; i < allPoints.length; i++) {
+      const baseline = baselineData[i];
+      const util = allPoints[i].overall_utilization;
+      if (!baseline) { currentAnomaly = null; continue; }
+      const lower = baseline.lower_bound || baseline.baseline_lower || 0;
+      const upper = baseline.upper_bound || baseline.baseline_upper || 100;
+      let type = null;
+      if (util > upper) type = 'high';
+      else if (util < lower) type = 'low';
+
+      if (type) {
+        if (currentAnomaly && currentAnomaly.type === type) {
+          currentAnomaly.endIdx = i;
+        } else {
+          if (currentAnomaly) anomalySegments.push(currentAnomaly);
+          currentAnomaly = { type, startIdx: i, endIdx: i };
+        }
+      } else {
+        if (currentAnomaly) {
+          anomalySegments.push(currentAnomaly);
+          currentAnomaly = null;
+        }
+      }
+    }
+    if (currentAnomaly) anomalySegments.push(currentAnomaly);
+  }
+
   return (
     <svg width="100%" viewBox={`0 0 ${w} ${h}`} className="capacity-trend-chart">
       <defs>
         <linearGradient id="trendGrad" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.3" />
           <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.02" />
+        </linearGradient>
+        <linearGradient id="baselineGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#06b6d4" stopOpacity="0.18" />
+          <stop offset="100%" stopColor="#06b6d4" stopOpacity="0.08" />
         </linearGradient>
       </defs>
       {[0, 0.25, 0.5, 0.75, 1].map(f => (
@@ -103,19 +157,52 @@ function TrendChart({ trend, predictionPoints, expansionPlan }) {
       <line x1={pad.l} y1={y100} x2={w - pad.r} y2={y100} stroke="#ef4444" strokeWidth="1" strokeDasharray="6,3" />
       <text x={w - pad.r + 4} y={y100 + 4} fill="#ef4444" fontSize="9">100%</text>
 
+      {baselineBandPath && (
+        <path d={baselineBandPath} fill="url(#baselineGrad)" />
+      )}
+      {baselineMeanPath && (
+        <path d={baselineMeanPath} fill="none" stroke="#06b6d4" strokeWidth="1.2" strokeDasharray="4,3" opacity="0.8" />
+      )}
+
       {actualPts.length > 1 && (
         <path d={actualLine + ` L${actualPts[actualPts.length - 1].x},${pad.t + ih} L${actualPts[0].x},${pad.t + ih} Z`}
           fill="url(#trendGrad)" />
       )}
       <path d={actualLine} fill="none" stroke="#3b82f6" strokeWidth="2" />
 
+      {anomalySegments.map((seg, si) => {
+        const segPts = [];
+        for (let i = seg.startIdx; i <= seg.endIdx; i++) {
+          if (actualPts[i]) segPts.push(actualPts[i]);
+        }
+        if (segPts.length < 1) return null;
+        const segPath = segPts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ');
+        const strokeColor = seg.type === 'high' ? '#f97316' : '#a855f7';
+        return (
+          <g key={`anomaly-${si}`}>
+            <path d={segPath} fill="none" stroke={strokeColor} strokeWidth="3.5" strokeLinecap="round" />
+            {segPts.filter((_, i) => i % Math.max(1, Math.floor(segPts.length / 6)) === 0).map((p, i) => (
+              <circle key={i} cx={p.x} cy={p.y} r="4" fill={strokeColor} stroke="#fff" strokeWidth="1" />
+            ))}
+          </g>
+        );
+      })}
+
       {predLine && (
         <path d={predLine} fill="none" stroke="#a855f7" strokeWidth="2" strokeDasharray="8,4" />
       )}
 
-      {actualPts.filter((_, i) => i % Math.max(1, Math.floor(actualPts.length / 30)) === 0).map((p, i) => (
-        <circle key={i} cx={p.x} cy={p.y} r="2.5" fill="#3b82f6" />
-      ))}
+      {actualPts.filter((_, i) => i % Math.max(1, Math.floor(actualPts.length / 30)) === 0).map((p, i) => {
+        const baseline = baselineData[p.idx];
+        let isAnomaly = false;
+        if (baseline) {
+          const lower = baseline.lower_bound || baseline.baseline_lower || 0;
+          const upper = baseline.upper_bound || baseline.baseline_upper || 100;
+          isAnomaly = p.val > upper || p.val < lower;
+        }
+        if (isAnomaly) return null;
+        return <circle key={i} cx={p.x} cy={p.y} r="2.5" fill="#3b82f6" />;
+      })}
 
       {predPts.filter((_, i) => i % Math.max(1, Math.floor(predPts.length / 20)) === 0).map((p, i) => (
         <circle key={i} cx={p.x} cy={p.y} r="2.5" fill="#a855f7" />
@@ -139,11 +226,19 @@ function TrendChart({ trend, predictionPoints, expansionPlan }) {
         </text>
       )}
 
-      <g transform={`translate(${pad.l + 10}, ${pad.t + 10})`}>
+      <g transform={`translate(${pad.l + 10}, ${pad.t + 8})`}>
         <line x1="0" y1="0" x2="20" y2="0" stroke="#3b82f6" strokeWidth="2" />
         <text x="24" y="4" fill="#94a3b8" fontSize="10">实际水位</text>
-        <line x1="80" y1="0" x2="100" y2="0" stroke="#a855f7" strokeWidth="2" strokeDasharray="8,4" />
-        <text x="104" y="4" fill="#94a3b8" fontSize="10">预测趋势</text>
+        {baselineBandPath && (
+          <>
+            <rect x="80" y="-6" width="20" height="12" fill="url(#baselineGrad)" stroke="#06b6d4" strokeWidth="0.5" />
+            <text x="104" y="4" fill="#94a3b8" fontSize="10">基线范围</text>
+            <line x1="176" y1="0" x2="196" y2="0" stroke="#f97316" strokeWidth="3" />
+            <text x="200" y="4" fill="#94a3b8" fontSize="10">异常偏离</text>
+          </>
+        )}
+        <line x1={baselineBandPath ? 266 : 176} y1="0" x2={baselineBandPath ? 286 : 196} y2="0" stroke="#a855f7" strokeWidth="2" strokeDasharray="8,4" />
+        <text x={baselineBandPath ? 290 : 200} y="4" fill="#94a3b8" fontSize="10">预测趋势</text>
       </g>
     </svg>
   );
@@ -207,6 +302,7 @@ function CapacityConfigForm({ targetId, groupdId, existingConfig, onSave, onCanc
   const [maxConnections, setMaxConnections] = useState(existingConfig?.max_connections || '');
   const [maxLatencyMs, setMaxLatencyMs] = useState(existingConfig?.max_latency_ms || 500);
   const [maxThroughputRps, setMaxThroughputRps] = useState(existingConfig?.max_throughput_rps || '');
+  const [deviationThresholdPct, setDeviationThresholdPct] = useState(existingConfig?.deviation_threshold_pct ?? 30);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -215,6 +311,7 @@ function CapacityConfigForm({ targetId, groupdId, existingConfig, onSave, onCanc
         max_connections: maxConnections ? Number(maxConnections) : null,
         max_latency_ms: Number(maxLatencyMs),
         max_throughput_rps: maxThroughputRps ? Number(maxThroughputRps) : null,
+        deviation_threshold_pct: deviationThresholdPct ? Number(deviationThresholdPct) : null,
         is_override: !!targetId,
       };
       if (targetId) payload.target_id = targetId;
@@ -250,6 +347,15 @@ function CapacityConfigForm({ targetId, groupdId, existingConfig, onSave, onCanc
           <label>吞吐量峰值 (rps)</label>
           <input type="number" step="0.1" value={maxThroughputRps} onChange={e => setMaxThroughputRps(e.target.value)}
             placeholder="如 100" />
+        </div>
+        <div className="form-row">
+          <label>偏离告警阈值 (%)</label>
+          <input type="number" step="1" min="5" max="200" value={deviationThresholdPct}
+            onChange={e => setDeviationThresholdPct(e.target.value)}
+            placeholder="默认 30%" />
+          <small style={{ color: '#64748b', fontSize: '11px' }}>
+            当前水位相对基线偏离超过此百分比时触发告警（双向检测：高于和低于都检测）
+          </small>
         </div>
         <div className="form-actions">
           <button type="submit" className="btn-primary">保存</button>
@@ -320,6 +426,119 @@ function CapacityPlanForm({ targetId, existingPlan, onSave, onCancel }) {
   );
 }
 
+function DeviationAnalysis({ analysis, onResolveAlert }) {
+  if (!analysis) return null;
+  const {
+    effective_threshold_pct,
+    current_deviation_pct,
+    current_deviation_direction,
+    is_current_anomaly,
+    current_baseline_mean,
+    current_utilization,
+    events_24h,
+    anomaly_count_24h,
+    high_anomaly_count_24h,
+    low_anomaly_count_24h,
+    active_deviation_alerts,
+  } = analysis;
+
+  const dirLabel = current_deviation_direction === 'high' ? '高于基线' : current_deviation_direction === 'low' ? '低于基线' : '正常范围';
+  const dirColor = current_deviation_direction === 'high' ? '#f97316' : current_deviation_direction === 'low' ? '#a855f7' : '#22c55e';
+
+  return (
+    <div className="deviation-analysis">
+      <div className="deviation-metrics-grid">
+        <div className="capacity-metric-card">
+          <span className="metric-label">有效偏离阈值</span>
+          <span className="metric-value">±{effective_threshold_pct}%</span>
+        </div>
+        <div className="capacity-metric-card">
+          <span className="metric-label">当前偏离程度</span>
+          <span className="metric-value" style={{ color: dirColor }}>
+            {current_deviation_pct > 0 ? '+' : ''}{current_deviation_pct}%
+          </span>
+        </div>
+        <div className="capacity-metric-card">
+          <span className="metric-label">偏离方向</span>
+          <span className="metric-value" style={{ color: dirColor }}>
+            {is_current_anomaly ? '⚠️ ' : ''}{dirLabel}
+          </span>
+        </div>
+        <div className="capacity-metric-card">
+          <span className="metric-label">基线均值 / 当前值</span>
+          <span className="metric-value">
+            {current_baseline_mean.toFixed(1)}% / {current_utilization.toFixed(1)}%
+          </span>
+        </div>
+      </div>
+
+      <div className="deviation-summary-bar">
+        <div className="deviation-count-total">
+          近24小时异常偏离: <strong style={{ color: '#ef4444' }}>{anomaly_count_24h}</strong> 次
+        </div>
+        <div className="deviation-count-split">
+          <span style={{ color: '#f97316' }}>↑ 高于 {high_anomaly_count_24h}</span>
+          <span style={{ color: '#a855f7' }}>↓ 低于 {low_anomaly_count_24h}</span>
+        </div>
+      </div>
+
+      {events_24h && events_24h.length > 0 && (
+        <div className="deviation-events-list">
+          <h5>近24小时偏离事件</h5>
+          <div className="events-scroll">
+            {events_24h.map((ev, i) => {
+              const color = ev.deviation_direction === 'high' ? '#f97316' : '#a855f7';
+              const arrow = ev.deviation_direction === 'high' ? '↑' : '↓';
+              return (
+                <div key={i} className="deviation-event-row">
+                  <span className="event-time">{new Date(ev.hour).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
+                  <span className="event-direction" style={{ color }}>{arrow} {ev.deviation_direction === 'high' ? '偏高' : '偏低'}</span>
+                  <span className="event-values">
+                    {ev.current_utilization.toFixed(1)}% vs 基线 {ev.baseline_mean.toFixed(1)}%
+                  </span>
+                  <span className="event-deviation" style={{ color }}>
+                    {ev.deviation_pct > 0 ? '+' : ''}{ev.deviation_pct}%
+                  </span>
+                  {ev.is_anomaly && <span className="event-anomaly-tag">异常</span>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {active_deviation_alerts && active_deviation_alerts.length > 0 && (
+        <div className="deviation-alerts-list">
+          <h5>活跃偏离告警</h5>
+          {active_deviation_alerts.map(alert => {
+            const color = alert.deviation_direction === 'high' ? '#f97316' : '#a855f7';
+            const arrow = alert.deviation_direction === 'high' ? '↑' : '↓';
+            return (
+              <div key={alert.id} className="capacity-alert-card deviation-alert-card">
+                <div className="alert-header">
+                  <span className="alert-target" style={{ color }}>
+                    {arrow} 偏离告警 · {alert.deviation_direction === 'high' ? '高于基线' : '低于基线'}
+                  </span>
+                  <span className="alert-level" style={{ color }}>
+                    偏离 {alert.deviation_pct > 0 ? '+' : ''}{alert.deviation_pct}%
+                  </span>
+                </div>
+                <div className="alert-body">
+                  <div>时段: {new Date(alert.hour).toLocaleString('zh-CN')}</div>
+                  <div>当前水位: {alert.current_utilization}% / 基线均值: {alert.baseline_mean}% (阈值: ±{alert.threshold_pct}%)</div>
+                </div>
+                <button className="btn-sm alert-resolve-btn" onClick={() => onResolveAlert?.(alert.id)}>
+                  标记已处理
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CapacityDetail({ targetId, onBack }) {
   const [detail, setDetail] = useState(null);
   const [showConfigForm, setShowConfigForm] = useState(false);
@@ -345,6 +564,11 @@ function CapacityDetail({ targetId, onBack }) {
 
   const statusLabel = { green: '安全', yellow: '告警', red: '危险' };
   const statusIcon = { green: '✅', yellow: '⚠️', red: '🔴' };
+
+  const resolveDeviationAlert = async (alertId) => {
+    await fetch(`${API_BASE}/api/capacity/deviation-alerts/${alertId}/resolve`, { method: 'POST' });
+    loadDetail();
+  };
 
   return (
     <div className="capacity-detail">
@@ -375,11 +599,25 @@ function CapacityDetail({ targetId, onBack }) {
           <span className="metric-label">吞吐利用率</span>
           <span className="metric-value">{detail.trend?.length > 0 ? detail.trend[detail.trend.length - 1].throughput_utilization : 0}%</span>
         </div>
+        {detail.deviation_analysis?.is_current_anomaly && (
+          <div className="capacity-metric-card anomaly-card" style={{
+            borderColor: detail.deviation_analysis.current_deviation_direction === 'high' ? '#f97316' : '#a855f7',
+          }}>
+            <span className="metric-label">
+              ⚠️ 异常偏离 {detail.deviation_analysis.current_deviation_direction === 'high' ? '↑' : '↓'}
+            </span>
+            <span className="metric-value" style={{
+              color: detail.deviation_analysis.current_deviation_direction === 'high' ? '#f97316' : '#a855f7'
+            }}>
+              {detail.deviation_analysis.current_deviation_pct > 0 ? '+' : ''}{detail.deviation_analysis.current_deviation_pct}%
+            </span>
+          </div>
+        )}
       </div>
 
       <div className="capacity-section">
         <div className="capacity-section-header">
-          <h4>📊 7天水位趋势与预测</h4>
+          <h4>📊 7天水位趋势与基线对比</h4>
           {detail.prediction && (
             <div className="capacity-prediction-summary">
               <span className={`trend-badge ${detail.prediction.current_trend}`}>
@@ -403,8 +641,19 @@ function CapacityDetail({ targetId, onBack }) {
           trend={detail.trend}
           predictionPoints={detail.prediction?.prediction_points}
           expansionPlan={detail.plans?.[0]}
+          baselineBand={detail.baseline_band}
         />
       </div>
+
+      {detail.deviation_analysis && (
+        <div className="capacity-section">
+          <h4>📐 基线偏离分析</h4>
+          <DeviationAnalysis
+            analysis={detail.deviation_analysis}
+            onResolveAlert={resolveDeviationAlert}
+          />
+        </div>
+      )}
 
       <div className="capacity-section">
         <h4>🗓️ 每小时利用率热力图</h4>
@@ -432,6 +681,20 @@ function CapacityDetail({ targetId, onBack }) {
               <span>吞吐峰值</span>
               <strong>{detail.config.max_throughput_rps || '未设置'} rps</strong>
             </div>
+            <div className="config-item">
+              <span>偏离告警阈值</span>
+              <strong>
+                {detail.config.deviation_threshold_pct != null
+                  ? `±${detail.config.deviation_threshold_pct}%`
+                  : '未设置 (继承默认)'}
+              </strong>
+            </div>
+            {detail.deviation_analysis?.effective_threshold_pct != null && (
+              <div className="config-item" style={{ background: '#1e293b', borderRadius: '6px', padding: '6px 10px' }}>
+                <span style={{ color: '#06b6d4' }}>实际生效阈值</span>
+                <strong style={{ color: '#06b6d4' }}>±{detail.deviation_analysis.effective_threshold_pct}%</strong>
+              </div>
+            )}
             {detail.config.is_override && (
               <span className="override-badge">单独覆盖</span>
             )}
@@ -523,6 +786,7 @@ function CapacityDetail({ targetId, onBack }) {
 export default function CapacityMonitor() {
   const [overview, setOverview] = useState(null);
   const [alerts, setAlerts] = useState([]);
+  const [deviationAlerts, setDeviationAlerts] = useState([]);
   const [selectedTarget, setSelectedTarget] = useState(null);
   const [showGroupConfig, setShowGroupConfig] = useState(false);
   const [selectedGroupId, setSelectedGroupId] = useState(null);
@@ -551,15 +815,29 @@ export default function CapacityMonitor() {
     }
   }, []);
 
+  const loadDeviationAlerts = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/capacity/deviation-alerts?active_only=true`);
+      if (res.ok) {
+        const data = await res.json();
+        setDeviationAlerts(data);
+      }
+    } catch (e) {
+      console.error('Failed to load deviation alerts:', e);
+    }
+  }, []);
+
   useEffect(() => {
     loadOverview();
     loadAlerts();
+    loadDeviationAlerts();
     const interval = setInterval(() => {
       loadOverview();
       loadAlerts();
+      loadDeviationAlerts();
     }, 30000);
     return () => clearInterval(interval);
-  }, [loadOverview, loadAlerts]);
+  }, [loadOverview, loadAlerts, loadDeviationAlerts]);
 
   if (selectedTarget) {
     return <CapacityDetail targetId={selectedTarget} onBack={() => { setSelectedTarget(null); loadOverview(); }} />;
@@ -573,6 +851,8 @@ export default function CapacityMonitor() {
     ...configured.sort((a, b) => b.current_water_level - a.current_water_level),
     ...unconfigured,
   ];
+
+  const totalActiveAnomalies = overview.targets.reduce((sum, t) => sum + (t.deviation_anomaly_count_24h || 0), 0);
 
   return (
     <div className="capacity-monitor">
@@ -591,6 +871,12 @@ export default function CapacityMonitor() {
             <span className="stat-value">{overview.active_alerts}</span>
             <span className="stat-label">活跃预警</span>
           </div>
+          {totalActiveAnomalies > 0 && (
+            <div className="summary-stat" style={{ borderColor: '#f97316' }}>
+              <span className="stat-value" style={{ color: '#f97316' }}>{totalActiveAnomalies}</span>
+              <span className="stat-label">偏离异常</span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -615,11 +901,33 @@ export default function CapacityMonitor() {
         </div>
       )}
 
+      {deviationAlerts.length > 0 && (
+        <div className="capacity-alerts-banner deviation-banner">
+          <h4>⚠️ 基线偏离告警 ({deviationAlerts.length})</h4>
+          <div className="alerts-scroll">
+            {deviationAlerts.map(alert => {
+              const color = alert.deviation_direction === 'high' ? '#f97316' : '#a855f7';
+              return (
+                <div key={alert.id} className="capacity-alert-banner-item" onClick={() => setSelectedTarget(alert.target_id)}
+                  style={{ borderLeftColor: color }}>
+                  <span className="alert-status-dot" style={{ background: color }}></span>
+                  <span className="alert-target-name">{alert.target_name}</span>
+                  <span style={{ color }}>
+                    {alert.deviation_direction === 'high' ? '↑ 高于基线' : '↓ 低于基线'} {alert.deviation_pct > 0 ? '+' : ''}{alert.deviation_pct}%
+                  </span>
+                  <span className="alert-water-level">水位 {alert.current_utilization}% vs 基线 {alert.baseline_mean}%</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <div className="capacity-overview-grid">
         {sortedTargets.map(target => (
           <div
             key={target.target_id}
-            className={`capacity-target-card ${target.water_level_status}`}
+            className={`capacity-target-card ${target.water_level_status} ${target.has_deviation_anomaly_24h ? 'has-anomaly' : ''}`}
             onClick={() => setSelectedTarget(target.target_id)}
           >
             <div className="card-header">
@@ -643,6 +951,15 @@ export default function CapacityMonitor() {
                     <span className="mini-value">{target.throughput_utilization}%</span>
                   </div>
                 </div>
+                {(target.current_deviation_pct != null) && (
+                  <div className={`card-deviation ${target.current_deviation_pct > 0 ? 'high' : 'low'}`}>
+                    <span>
+                      {target.current_deviation_direction === 'high' ? '↑' : '↓'}
+                      偏离基线 {target.current_deviation_pct > 0 ? '+' : ''}{target.current_deviation_pct}%
+                    </span>
+                    {target.is_current_anomaly && <span className="anomaly-flag">异常</span>}
+                  </div>
+                )}
                 {(target.predicted_breach_85_at || target.predicted_breach_100_at) && (
                   <div className="card-prediction">
                     {target.predicted_breach_85_at && (

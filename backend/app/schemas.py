@@ -1331,6 +1331,7 @@ class CapacityConfigCreate(BaseModel):
     max_latency_ms: float = 500.0
     max_throughput_rps: Optional[float] = None
     is_override: bool = False
+    deviation_threshold_pct: Optional[float] = Field(None, ge=1, le=200)
 
     @model_validator(mode='after')
     def check_target_or_group(self):
@@ -1343,12 +1344,14 @@ class CapacityGroupConfigCreate(BaseModel):
     max_connections: Optional[int] = None
     max_latency_ms: float = 500.0
     max_throughput_rps: Optional[float] = None
+    deviation_threshold_pct: Optional[float] = Field(None, ge=1, le=200)
 
 
 class CapacityConfigUpdate(BaseModel):
     max_connections: Optional[int] = None
     max_latency_ms: Optional[float] = None
     max_throughput_rps: Optional[float] = None
+    deviation_threshold_pct: Optional[float] = Field(None, ge=1, le=200)
 
 
 class CapacityConfigResponse(BaseModel):
@@ -1359,11 +1362,94 @@ class CapacityConfigResponse(BaseModel):
     max_latency_ms: float
     max_throughput_rps: Optional[float] = None
     is_override: bool
+    deviation_threshold_pct: Optional[float] = None
     created_at: datetime
     updated_at: datetime
 
     class Config:
         from_attributes = True
+
+
+class CapacityBaselinePoint(BaseModel):
+    day_of_week: int
+    hour_of_day: int
+    mean_utilization: float
+    std_utilization: float
+    min_utilization: float
+    max_utilization: float
+    percentile_25: float
+    percentile_75: float
+    sample_count: int
+
+
+class CapacityBaselineBandPoint(BaseModel):
+    hour: datetime
+    baseline_mean: float
+    baseline_lower: float
+    baseline_upper: float
+    lower_bound: float
+    upper_bound: float
+
+
+class CapacityDeviationEvent(BaseModel):
+    hour: datetime
+    current_utilization: float
+    baseline_mean: float
+    deviation_pct: float
+    deviation_direction: str
+    is_anomaly: bool
+
+
+class CapacityDeviationAlertResponse(BaseModel):
+    id: int
+    target_id: int
+    target_name: str
+    hour: datetime
+    current_utilization: float
+    baseline_mean: float
+    baseline_std: float
+    deviation_pct: float
+    deviation_direction: str
+    threshold_pct: float
+    is_active: bool
+    resolved_at: Optional[datetime] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class CapacityDeviationAnalysis(BaseModel):
+    target_id: int
+    target_name: str
+    effective_threshold_pct: float
+    current_deviation_pct: float
+    current_deviation_direction: str
+    is_current_anomaly: bool
+    current_baseline_mean: float
+    current_utilization: float
+    events_24h: List[CapacityDeviationEvent] = []
+    anomaly_count_24h: int = 0
+    high_anomaly_count_24h: int = 0
+    low_anomaly_count_24h: int = 0
+    active_deviation_alerts: List[CapacityDeviationAlertResponse] = []
+
+
+class CapacityDetailResponse(BaseModel):
+    target_id: int
+    target_name: str
+    group_name: Optional[str] = None
+    config: Optional[CapacityConfigResponse] = None
+    current_water_level: float
+    water_level_status: str
+    trend: List[CapacityHourlyPoint] = []
+    heatmap: List[CapacityHeatmapCell] = []
+    prediction: Optional[CapacityPredictionResult] = None
+    plans: List[CapacityPlanResponse] = []
+    alerts: List[CapacityAlertResponse] = []
+    baseline_band: List[CapacityBaselineBandPoint] = []
+    deviation_analysis: Optional[CapacityDeviationAnalysis] = None
+    effective_deviation_threshold: float = 30.0
 
 
 class CapacityOverviewItem(BaseModel):
@@ -1378,6 +1464,10 @@ class CapacityOverviewItem(BaseModel):
     has_capacity_config: bool
     predicted_breach_85_at: Optional[datetime] = None
     predicted_breach_100_at: Optional[datetime] = None
+    current_deviation_pct: Optional[float] = None
+    current_deviation_direction: Optional[str] = None
+    has_deviation_anomaly: bool = False
+    effective_deviation_threshold: float = 30.0
 
 
 class CapacityOverviewResponse(BaseModel):

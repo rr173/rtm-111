@@ -19,6 +19,7 @@ from .models import (
     MaintenanceWindow, MaintenanceWindowEvent,
     DutySchedule, DutySlot, DutySwap, DispatchedAlert,
     CapacityConfig, CapacityHourlySnapshot, CapacityAlert, CapacityPlan,
+    CapacityBaseline, CapacityDeviationAlert,
 )
 from .schemas import (
     ProbeTargetCreate, ProbeTargetUpdate, ProbeTargetResponse,
@@ -61,6 +62,8 @@ from .schemas import (
     CapacityHourlyPoint, CapacityHeatmapCell,
     CapacityPredictionResult, CapacityPlanCreate, CapacityPlanUpdate, CapacityPlanResponse,
     CapacityAlertResponse, CapacityDetailResponse,
+    CapacityBaselineBandPoint, CapacityDeviationEvent,
+    CapacityDeviationAlertResponse, CapacityDeviationAnalysis,
 )
 from .observer_engine import observer_engine
 from .probe_engine import probe_engine
@@ -1004,6 +1007,7 @@ def _migrate_capacity_tables():
                         max_latency_ms REAL NOT NULL DEFAULT 500.0,
                         max_throughput_rps REAL,
                         is_override INTEGER DEFAULT 0,
+                        deviation_threshold_pct REAL,
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE CASCADE,
@@ -1052,6 +1056,41 @@ def _migrate_capacity_tables():
                         FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE CASCADE
                     )
                 """,
+                "capacity_baselines": """
+                    CREATE TABLE capacity_baselines (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        target_id INTEGER NOT NULL,
+                        day_of_week INTEGER NOT NULL,
+                        hour_of_day INTEGER NOT NULL,
+                        mean_utilization REAL NOT NULL DEFAULT 0,
+                        std_utilization REAL NOT NULL DEFAULT 0,
+                        min_utilization REAL NOT NULL DEFAULT 0,
+                        max_utilization REAL NOT NULL DEFAULT 0,
+                        percentile_25 REAL NOT NULL DEFAULT 0,
+                        percentile_75 REAL NOT NULL DEFAULT 0,
+                        sample_count INTEGER NOT NULL DEFAULT 0,
+                        last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE CASCADE
+                    )
+                """,
+                "capacity_deviation_alerts": """
+                    CREATE TABLE capacity_deviation_alerts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        target_id INTEGER NOT NULL,
+                        target_name VARCHAR(255) NOT NULL,
+                        hour DATETIME NOT NULL,
+                        current_utilization REAL NOT NULL,
+                        baseline_mean REAL NOT NULL,
+                        baseline_std REAL NOT NULL,
+                        deviation_pct REAL NOT NULL,
+                        deviation_direction VARCHAR(10) NOT NULL,
+                        threshold_pct REAL NOT NULL,
+                        is_active INTEGER DEFAULT 1,
+                        resolved_at DATETIME,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE CASCADE
+                    )
+                """,
             }
 
             for table_name, create_sql in capacity_tables.items():
@@ -1074,11 +1113,26 @@ def _migrate_capacity_tables():
                         "capacity_plans": [
                             "CREATE INDEX idx_cp_target_id ON capacity_plans(target_id)",
                         ],
+                        "capacity_baselines": [
+                            "CREATE INDEX idx_cb_target_id ON capacity_baselines(target_id)",
+                            "CREATE INDEX idx_cb_day_hour ON capacity_baselines(day_of_week, hour_of_day)",
+                        ],
+                        "capacity_deviation_alerts": [
+                            "CREATE INDEX idx_cda_target_id ON capacity_deviation_alerts(target_id)",
+                            "CREATE INDEX idx_cda_hour ON capacity_deviation_alerts(hour)",
+                            "CREATE INDEX idx_cda_is_active ON capacity_deviation_alerts(is_active)",
+                        ],
                     }
                     if table_name in index_sqls:
                         for idx_sql in index_sqls[table_name]:
                             conn.execute(text(idx_sql))
                     print(f"Created table {table_name}")
+
+            result = conn.execute(text("PRAGMA table_info(capacity_configs)"))
+            columns = [row[1] for row in result.fetchall()]
+            if "deviation_threshold_pct" not in columns:
+                conn.execute(text("ALTER TABLE capacity_configs ADD COLUMN deviation_threshold_pct REAL"))
+                print("Added column deviation_threshold_pct to capacity_configs")
 
             conn.commit()
         except Exception as e:
@@ -1163,7 +1217,9 @@ def _compute_capacity_snapshots_sync(db):
             db.add(snapshot)
 
     db.commit()
+    _compute_all_baselines(db)
     _generate_capacity_alerts(db)
+    _generate_deviation_alerts(db)
 
 
 @app.on_event("startup")
@@ -6975,6 +7031,223 @@ def _get_effective_capacity_config(db: Session, target_id: int):
     return None
 
 
+DEFAULT_DEVIATION_THRESHOLD_PCT = 30.0
+
+
+def _get_effective_deviation_threshold(db: Session, target_id: int) -> float:
+    config = _get_effective_capacity_config(db, target_id)
+    if config and config.deviation_threshold_pct is not None:
+        return float(config.deviation_threshold_pct)
+    return DEFAULT_DEVIATION_THRESHOLD_PCT
+
+
+def _percentile(sorted_data, p):
+    if not sorted_data:
+        return 0.0
+    k = (len(sorted_data) - 1) * (p / 100.0)
+    f = int(k)
+    c = f + 1 if f + 1 < len(sorted_data) else f
+    if f == c:
+        return sorted_data[int(k)]
+    return sorted_data[f] + (sorted_data[c] - sorted_data[f]) * (k - f)
+
+
+def _compute_baselines_for_target(db: Session, target_id: int):
+    two_weeks_ago = datetime.utcnow() - timedelta(days=14)
+
+    snapshots = db.query(CapacityHourlySnapshot).filter(
+        CapacityHourlySnapshot.target_id == target_id,
+        CapacityHourlySnapshot.hour >= two_weeks_ago
+    ).all()
+
+    if not snapshots:
+        return
+
+    grouped = {}
+    for s in snapshots:
+        key = (s.hour.weekday(), s.hour.hour)
+        if key not in grouped:
+            grouped[key] = []
+        grouped[key].append(s.overall_utilization)
+
+    for (dow, hod), values in grouped.items():
+        if len(values) < 2:
+            continue
+
+        sorted_vals = sorted(values)
+        n = len(sorted_vals)
+        mean = sum(sorted_vals) / n
+        variance = sum((x - mean) ** 2 for x in sorted_vals) / n
+        std = variance ** 0.5
+
+        existing = db.query(CapacityBaseline).filter(
+            CapacityBaseline.target_id == target_id,
+            CapacityBaseline.day_of_week == dow,
+            CapacityBaseline.hour_of_day == hod
+        ).first()
+
+        if existing:
+            existing.mean_utilization = mean
+            existing.std_utilization = std
+            existing.min_utilization = min(sorted_vals)
+            existing.max_utilization = max(sorted_vals)
+            existing.percentile_25 = _percentile(sorted_vals, 25)
+            existing.percentile_75 = _percentile(sorted_vals, 75)
+            existing.sample_count = n
+            existing.last_updated = datetime.utcnow()
+        else:
+            baseline = CapacityBaseline(
+                target_id=target_id,
+                day_of_week=dow,
+                hour_of_day=hod,
+                mean_utilization=mean,
+                std_utilization=std,
+                min_utilization=min(sorted_vals),
+                max_utilization=max(sorted_vals),
+                percentile_25=_percentile(sorted_vals, 25),
+                percentile_75=_percentile(sorted_vals, 75),
+                sample_count=n,
+            )
+            db.add(baseline)
+
+    db.commit()
+
+
+def _compute_all_baselines(db: Session):
+    targets = db.query(ProbeTarget).all()
+    for target in targets:
+        config = _get_effective_capacity_config(db, target.id)
+        if config:
+            _compute_baselines_for_target(db, target.id)
+
+
+def _get_baseline_for_slot(db: Session, target_id: int, dt: datetime):
+    dow = dt.weekday()
+    hod = dt.hour
+    return db.query(CapacityBaseline).filter(
+        CapacityBaseline.target_id == target_id,
+        CapacityBaseline.day_of_week == dow,
+        CapacityBaseline.hour_of_day == hod
+    ).first()
+
+
+def _detect_deviation(current_util: float, baseline: CapacityBaseline,
+                      threshold_pct: float):
+    if baseline is None or baseline.mean_utilization <= 0:
+        return None, None, False
+
+    mean = baseline.mean_utilization
+    deviation_abs = current_util - mean
+    deviation_pct = (deviation_abs / mean) * 100.0
+
+    if deviation_abs > 0:
+        direction = "high"
+    else:
+        direction = "low"
+
+    is_anomaly = abs(deviation_pct) > threshold_pct
+
+    return round(deviation_pct, 2), direction, is_anomaly
+
+
+def _generate_baseline_band(db: Session, target_id: int, start_dt: datetime,
+                            end_dt: datetime, threshold_pct: float):
+    band = []
+    current = start_dt.replace(minute=0, second=0, microsecond=0)
+    end = end_dt.replace(minute=0, second=0, microsecond=0)
+
+    while current <= end:
+        baseline = _get_baseline_for_slot(db, target_id, current)
+        if baseline and baseline.sample_count >= 2:
+            mean = baseline.mean_utilization
+            std = baseline.std_utilization
+            iqr = baseline.percentile_75 - baseline.percentile_25
+            band_half_width = max(std * 1.5, iqr * 0.75, mean * threshold_pct / 100.0)
+
+            band.append(CapacityBaselineBandPoint(
+                hour=current,
+                baseline_mean=round(mean * 100, 1),
+                baseline_lower=round(baseline.percentile_25 * 100, 1),
+                baseline_upper=round(baseline.percentile_75 * 100, 1),
+                lower_bound=round(max(0, mean - band_half_width) * 100, 1),
+                upper_bound=round(min(1.5, mean + band_half_width) * 100, 1),
+            ))
+        else:
+            band.append(CapacityBaselineBandPoint(
+                hour=current,
+                baseline_mean=0,
+                baseline_lower=0,
+                baseline_upper=0,
+                lower_bound=0,
+                upper_bound=150,
+            ))
+        current += timedelta(hours=1)
+
+    return band
+
+
+def _generate_deviation_alerts(db: Session):
+    targets = db.query(ProbeTarget).all()
+    for target in targets:
+        config = _get_effective_capacity_config(db, target.id)
+        if not config:
+            continue
+
+        threshold_pct = _get_effective_deviation_threshold(db, target.id)
+
+        latest = db.query(CapacityHourlySnapshot).filter(
+            CapacityHourlySnapshot.target_id == target.id
+        ).order_by(CapacityHourlySnapshot.hour.desc()).first()
+
+        if not latest:
+            continue
+
+        baseline = _get_baseline_for_slot(db, target.id, latest.hour)
+        deviation_pct, direction, is_anomaly = _detect_deviation(
+            latest.overall_utilization, baseline, threshold_pct
+        )
+
+        if is_anomaly and deviation_pct is not None:
+            existing_active = db.query(CapacityDeviationAlert).filter(
+                CapacityDeviationAlert.target_id == target.id,
+                CapacityDeviationAlert.is_active == True,
+                CapacityDeviationAlert.deviation_direction == direction
+            ).first()
+
+            if existing_active:
+                if abs(existing_active.deviation_pct - deviation_pct) > 5:
+                    existing_active.current_utilization = latest.overall_utilization
+                    existing_active.baseline_mean = baseline.mean_utilization if baseline else 0
+                    existing_active.baseline_std = baseline.std_utilization if baseline else 0
+                    existing_active.deviation_pct = deviation_pct
+                    existing_active.threshold_pct = threshold_pct
+                    existing_active.hour = latest.hour
+            else:
+                alert = CapacityDeviationAlert(
+                    target_id=target.id,
+                    target_name=target.name,
+                    hour=latest.hour,
+                    current_utilization=latest.overall_utilization,
+                    baseline_mean=baseline.mean_utilization if baseline else 0,
+                    baseline_std=baseline.std_utilization if baseline else 0,
+                    deviation_pct=deviation_pct,
+                    deviation_direction=direction,
+                    threshold_pct=threshold_pct,
+                    is_active=True,
+                )
+                db.add(alert)
+        else:
+            active_alerts = db.query(CapacityDeviationAlert).filter(
+                CapacityDeviationAlert.target_id == target.id,
+                CapacityDeviationAlert.is_active == True
+            ).all()
+            for aa in active_alerts:
+                aa.is_active = False
+                aa.resolved_at = datetime.utcnow()
+
+    db.commit()
+
+
 def _calculate_utilization(avg_latency_ms, success_rate, request_count, config):
     latency_util = min(avg_latency_ms / config.max_latency_ms, 1.0) if config.max_latency_ms else 0.0
     connection_util = 0.0
@@ -7050,6 +7323,10 @@ def get_capacity_overview(db: Session = Depends(get_db)):
                 has_capacity_config=False,
                 predicted_breach_85_at=None,
                 predicted_breach_100_at=None,
+                current_deviation_pct=None,
+                current_deviation_direction=None,
+                has_deviation_anomaly=False,
+                effective_deviation_threshold=DEFAULT_DEVIATION_THRESHOLD_PCT,
             ))
             continue
 
@@ -7087,6 +7364,17 @@ def get_capacity_overview(db: Session = Depends(get_db)):
             predicted_85 = _predict_breach_time(data_points, 1, 0.85)
             predicted_100 = _predict_breach_time(data_points, 1, 1.0)
 
+        deviation_pct = None
+        deviation_dir = None
+        is_anomaly = False
+        threshold_pct = _get_effective_deviation_threshold(db, target.id)
+
+        if latest_snapshot:
+            baseline = _get_baseline_for_slot(db, target.id, latest_snapshot.hour)
+            deviation_pct, deviation_dir, is_anomaly = _detect_deviation(
+                latest_snapshot.overall_utilization, baseline, threshold_pct
+            )
+
         items.append(CapacityOverviewItem(
             target_id=target.id,
             target_name=target.name,
@@ -7099,6 +7387,10 @@ def get_capacity_overview(db: Session = Depends(get_db)):
             has_capacity_config=True,
             predicted_breach_85_at=predicted_85,
             predicted_breach_100_at=predicted_100,
+            current_deviation_pct=deviation_pct,
+            current_deviation_direction=deviation_dir,
+            has_deviation_anomaly=is_anomaly,
+            effective_deviation_threshold=threshold_pct,
         ))
 
     active_alerts = db.query(CapacityAlert).filter(CapacityAlert.is_active == True).all()
@@ -7118,6 +7410,7 @@ def get_capacity_detail(target_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Target not found")
 
     config = _get_effective_capacity_config(db, target_id)
+    threshold_pct = _get_effective_deviation_threshold(db, target_id)
 
     snapshots = db.query(CapacityHourlySnapshot).filter(
         CapacityHourlySnapshot.target_id == target_id,
@@ -7214,6 +7507,85 @@ def get_capacity_detail(target_id: int, db: Session = Depends(get_db)):
         created_at=a.created_at,
     ) for a in alerts]
 
+    start_dt = snapshots[0].hour if snapshots else datetime.utcnow() - timedelta(days=7)
+    end_dt = datetime.utcnow() + timedelta(days=7)
+    baseline_band = _generate_baseline_band(db, target_id, start_dt, end_dt, threshold_pct)
+
+    deviation_analysis = None
+    if snapshots:
+        now = datetime.utcnow()
+        last_24h_start = now - timedelta(hours=24)
+        last_24h_snapshots = [s for s in snapshots if s.hour >= last_24h_start]
+
+        events_24h = []
+        anomaly_count = 0
+        high_anomaly_count = 0
+        low_anomaly_count = 0
+
+        for s in last_24h_snapshots:
+            baseline = _get_baseline_for_slot(db, target_id, s.hour)
+            dev_pct, dev_dir, is_anom = _detect_deviation(
+                s.overall_utilization, baseline, threshold_pct
+            )
+            if dev_pct is not None:
+                event = CapacityDeviationEvent(
+                    hour=s.hour,
+                    current_utilization=round(s.overall_utilization * 100, 1),
+                    baseline_mean=round((baseline.mean_utilization if baseline else 0) * 100, 1),
+                    deviation_pct=dev_pct,
+                    deviation_direction=dev_dir or "normal",
+                    is_anomaly=is_anom,
+                )
+                events_24h.append(event)
+                if is_anom:
+                    anomaly_count += 1
+                    if dev_dir == "high":
+                        high_anomaly_count += 1
+                    elif dev_dir == "low":
+                        low_anomaly_count += 1
+
+        latest = snapshots[-1]
+        latest_baseline = _get_baseline_for_slot(db, target_id, latest.hour)
+        cur_dev_pct, cur_dev_dir, cur_is_anom = _detect_deviation(
+            latest.overall_utilization, latest_baseline, threshold_pct
+        )
+
+        active_dev_alerts = db.query(CapacityDeviationAlert).filter(
+            CapacityDeviationAlert.target_id == target_id,
+            CapacityDeviationAlert.is_active == True
+        ).order_by(CapacityDeviationAlert.created_at.desc()).all()
+        dev_alert_responses = [CapacityDeviationAlertResponse(
+            id=a.id,
+            target_id=a.target_id,
+            target_name=a.target_name,
+            hour=a.hour,
+            current_utilization=round(a.current_utilization * 100, 1),
+            baseline_mean=round(a.baseline_mean * 100, 1),
+            baseline_std=round(a.baseline_std * 100, 1),
+            deviation_pct=a.deviation_pct,
+            deviation_direction=a.deviation_direction,
+            threshold_pct=a.threshold_pct,
+            is_active=a.is_active,
+            resolved_at=a.resolved_at,
+            created_at=a.created_at,
+        ) for a in active_dev_alerts]
+
+        deviation_analysis = CapacityDeviationAnalysis(
+            target_id=target_id,
+            target_name=target.name,
+            effective_threshold_pct=threshold_pct,
+            current_deviation_pct=cur_dev_pct or 0.0,
+            current_deviation_direction=cur_dev_dir or "normal",
+            is_current_anomaly=cur_is_anom,
+            current_baseline_mean=round((latest_baseline.mean_utilization if latest_baseline else 0) * 100, 1),
+            current_utilization=round(latest.overall_utilization * 100, 1),
+            events_24h=events_24h,
+            anomaly_count_24h=anomaly_count,
+            high_anomaly_count_24h=high_anomaly_count,
+            low_anomaly_count_24h=low_anomaly_count,
+            active_deviation_alerts=dev_alert_responses,
+        )
+
     return CapacityDetailResponse(
         target_id=target_id,
         target_name=target.name,
@@ -7226,6 +7598,7 @@ def get_capacity_detail(target_id: int, db: Session = Depends(get_db)):
             max_latency_ms=config.max_latency_ms,
             max_throughput_rps=config.max_throughput_rps,
             is_override=config.is_override,
+            deviation_threshold_pct=config.deviation_threshold_pct,
             created_at=config.created_at,
             updated_at=config.updated_at,
         ),
@@ -7236,6 +7609,9 @@ def get_capacity_detail(target_id: int, db: Session = Depends(get_db)):
         prediction=prediction,
         plans=plan_responses,
         alerts=alert_responses,
+        baseline_band=baseline_band,
+        deviation_analysis=deviation_analysis,
+        effective_deviation_threshold=threshold_pct,
     )
 
 
@@ -7261,6 +7637,7 @@ def create_capacity_config(data: CapacityConfigCreate, db: Session = Depends(get
         existing.max_latency_ms = data.max_latency_ms
         existing.max_throughput_rps = data.max_throughput_rps
         existing.is_override = data.is_override or False
+        existing.deviation_threshold_pct = data.deviation_threshold_pct
         existing.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(existing)
@@ -7273,6 +7650,7 @@ def create_capacity_config(data: CapacityConfigCreate, db: Session = Depends(get
         max_latency_ms=data.max_latency_ms,
         max_throughput_rps=data.max_throughput_rps,
         is_override=data.is_override or False,
+        deviation_threshold_pct=data.deviation_threshold_pct,
     )
     db.add(config)
     db.commit()
@@ -7320,6 +7698,46 @@ def get_capacity_alerts(active_only: bool = True, db: Session = Depends(get_db))
         is_active=a.is_active,
         created_at=a.created_at,
     ) for a in alerts]
+
+
+@app.get("/api/capacity/deviation-alerts", response_model=List[CapacityDeviationAlertResponse])
+def get_capacity_deviation_alerts(active_only: bool = True, db: Session = Depends(get_db)):
+    query = db.query(CapacityDeviationAlert)
+    if active_only:
+        query = query.filter(CapacityDeviationAlert.is_active == True)
+    alerts = query.order_by(CapacityDeviationAlert.created_at.desc()).all()
+    return [CapacityDeviationAlertResponse(
+        id=a.id,
+        target_id=a.target_id,
+        target_name=a.target_name,
+        hour=a.hour,
+        current_utilization=round(a.current_utilization * 100, 1),
+        baseline_mean=round(a.baseline_mean * 100, 1),
+        baseline_std=round(a.baseline_std * 100, 1),
+        deviation_pct=a.deviation_pct,
+        deviation_direction=a.deviation_direction,
+        threshold_pct=a.threshold_pct,
+        is_active=a.is_active,
+        resolved_at=a.resolved_at,
+        created_at=a.created_at,
+    ) for a in alerts]
+
+
+@app.post("/api/capacity/deviation-alerts/{alert_id}/resolve")
+def resolve_capacity_deviation_alert(alert_id: int, db: Session = Depends(get_db)):
+    alert = db.query(CapacityDeviationAlert).filter(CapacityDeviationAlert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Deviation alert not found")
+    alert.is_active = False
+    alert.resolved_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/capacity/recompute-baselines")
+def recompute_baselines(db: Session = Depends(get_db)):
+    _compute_all_baselines(db)
+    return {"ok": True}
 
 
 @app.post("/api/capacity/alerts/{alert_id}/resolve")
@@ -7434,7 +7852,9 @@ def compute_capacity_snapshots(db: Session = Depends(get_db)):
         computed += 1
 
     db.commit()
+    _compute_all_baselines(db)
     _generate_capacity_alerts(db)
+    _generate_deviation_alerts(db)
     return {"ok": True, "computed": computed}
 
 
@@ -7516,12 +7936,14 @@ def apply_group_capacity_config(group_id: int, data: CapacityGroupConfigCreate, 
             max_connections=data.max_connections,
             max_latency_ms=data.max_latency_ms,
             max_throughput_rps=data.max_throughput_rps,
+            deviation_threshold_pct=data.deviation_threshold_pct,
         )
         db.add(group_config)
     else:
         group_config.max_connections = data.max_connections
         group_config.max_latency_ms = data.max_latency_ms
         group_config.max_throughput_rps = data.max_throughput_rps
+        group_config.deviation_threshold_pct = data.deviation_threshold_pct
         group_config.updated_at = datetime.utcnow()
 
     targets = db.query(ProbeTarget).filter(ProbeTarget.group_id == group_id).all()
@@ -7558,6 +7980,7 @@ def _init_demo_capacity():
                 max_connections=1000,
                 max_latency_ms=500.0,
                 max_throughput_rps=100.0,
+                deviation_threshold_pct=30.0,
             )
             db.add(group_config)
 
@@ -7567,6 +7990,7 @@ def _init_demo_capacity():
             max_latency_ms=1000.0,
             max_throughput_rps=500.0,
             is_override=True,
+            deviation_threshold_pct=25.0,
         )
         db.add(safe_config)
 
@@ -7576,6 +8000,7 @@ def _init_demo_capacity():
             max_latency_ms=300.0,
             max_throughput_rps=100.0,
             is_override=True,
+            deviation_threshold_pct=30.0,
         )
         db.add(warning_config)
 
@@ -7585,16 +8010,29 @@ def _init_demo_capacity():
             max_latency_ms=200.0,
             max_throughput_rps=50.0,
             is_override=True,
+            deviation_threshold_pct=35.0,
         )
         db.add(critical_config)
         db.commit()
 
         now = datetime.utcnow()
-        for hour_offset in range(168, 0, -1):
-            hour = (now - timedelta(hours=hour_offset)).replace(minute=0, second=0, microsecond=0)
+        total_hours = 336
 
-            safe_base = 0.25 + 0.05 * (168 - hour_offset) / 168.0
-            safe_val = max(0.05, min(safe_base + (hash(f"safe_{hour_offset}") % 100 - 50) / 1000.0, 0.55))
+        def _periodic_factor(hour_dt):
+            hour = hour_dt.hour
+            weekday = hour_dt.weekday()
+            day_factor = 0.8 if weekday >= 5 else 1.0
+            hour_factor = 0.4 + 0.6 * (0.5 + 0.5 * math.sin((hour - 6) / 24 * 2 * math.pi)) if 6 <= hour <= 22 else 0.3
+            return day_factor * hour_factor
+
+        import math
+
+        for hour_offset in range(total_hours, 0, -1):
+            hour = (now - timedelta(hours=hour_offset)).replace(minute=0, second=0, microsecond=0)
+            pf = _periodic_factor(hour)
+
+            safe_base = 0.25 + 0.10 * (total_hours - hour_offset) / total_hours
+            safe_val = max(0.05, min(safe_base * pf + (hash(f"safe_{hour_offset}") % 100 - 50) / 2000.0, 0.6))
             db.add(CapacityHourlySnapshot(
                 target_id=safe_target.id,
                 hour=hour,
@@ -7607,8 +8045,10 @@ def _init_demo_capacity():
                 overall_utilization=safe_val,
             ))
 
-            warning_base = 0.45 + 0.35 * (168 - hour_offset) / 168.0
-            warning_val = max(0.3, min(warning_base + (hash(f"warn_{hour_offset}") % 100 - 50) / 800.0, 0.84))
+            warning_base = 0.45 + 0.40 * (total_hours - hour_offset) / total_hours
+            warning_val = max(0.25, min(warning_base * pf + (hash(f"warn_{hour_offset}") % 100 - 50) / 1500.0, 0.88))
+            if 216 <= hour_offset <= 220:
+                warning_val = warning_val * 1.6
             db.add(CapacityHourlySnapshot(
                 target_id=warning_target.id,
                 hour=hour,
@@ -7621,8 +8061,10 @@ def _init_demo_capacity():
                 overall_utilization=warning_val,
             ))
 
-            critical_base = 0.6 + 0.35 * (168 - hour_offset) / 168.0
-            critical_val = max(0.5, min(critical_base + (hash(f"crit_{hour_offset}") % 100 - 50) / 600.0, 0.98))
+            critical_base = 0.6 + 0.35 * (total_hours - hour_offset) / total_hours
+            critical_val = max(0.45, min(critical_base * pf + (hash(f"crit_{hour_offset}") % 100 - 50) / 1000.0, 0.98))
+            if 100 <= hour_offset <= 104:
+                critical_val = critical_val * 0.4
             db.add(CapacityHourlySnapshot(
                 target_id=critical_target.id,
                 hour=hour,
@@ -7637,7 +8079,9 @@ def _init_demo_capacity():
 
         db.commit()
 
+        _compute_all_baselines(db)
         _generate_capacity_alerts(db)
+        _generate_deviation_alerts(db)
 
         plan = CapacityPlan(
             target_id=critical_target.id,

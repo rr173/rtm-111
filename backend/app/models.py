@@ -697,11 +697,51 @@ class CapacityConfig(Base):
     max_latency_ms = Column(Float, nullable=False, default=500.0)
     max_throughput_rps = Column(Float, nullable=True)
     is_override = Column(Boolean, default=False)
+    deviation_threshold_pct = Column(Float, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     target = relationship("ProbeTarget", backref="capacity_config")
     group = relationship("ProbeGroup", backref="capacity_config")
+
+
+class CapacityBaseline(Base):
+    __tablename__ = "capacity_baselines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False, index=True)
+    day_of_week = Column(Integer, nullable=False, index=True)
+    hour_of_day = Column(Integer, nullable=False, index=True)
+    mean_utilization = Column(Float, nullable=False, default=0.0)
+    std_utilization = Column(Float, nullable=False, default=0.0)
+    min_utilization = Column(Float, nullable=False, default=0.0)
+    max_utilization = Column(Float, nullable=False, default=0.0)
+    percentile_25 = Column(Float, nullable=False, default=0.0)
+    percentile_75 = Column(Float, nullable=False, default=0.0)
+    sample_count = Column(Integer, nullable=False, default=0)
+    last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    target = relationship("ProbeTarget", backref="capacity_baselines")
+
+
+class CapacityDeviationAlert(Base):
+    __tablename__ = "capacity_deviation_alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False, index=True)
+    target_name = Column(String(255), nullable=False)
+    hour = Column(DateTime, nullable=False, index=True)
+    current_utilization = Column(Float, nullable=False)
+    baseline_mean = Column(Float, nullable=False)
+    baseline_std = Column(Float, nullable=False)
+    deviation_pct = Column(Float, nullable=False)
+    deviation_direction = Column(String(10), nullable=False)
+    threshold_pct = Column(Float, nullable=False)
+    is_active = Column(Boolean, default=True, index=True)
+    resolved_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    target = relationship("ProbeTarget", backref="capacity_deviation_alerts")
 
 
 class CapacityHourlySnapshot(Base):

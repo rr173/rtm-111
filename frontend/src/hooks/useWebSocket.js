@@ -29,6 +29,8 @@ export function useWebSocket() {
   const [targets, setTargets] = useState([]);
   const [groups, setGroups] = useState([]);
   const [alerts, setAlerts] = useState([]);
+  const [capacityDeviationAlerts, setCapacityDeviationAlerts] = useState([]);
+  const [capacityUpdate, setCapacityUpdate] = useState(0);
   const [dependencies, setDependencies] = useState([]);
   const [observers, setObservers] = useState([]);
   const [observationMatrix, setObservationMatrix] = useState(null);
@@ -273,6 +275,17 @@ export function useWebSocket() {
           setMaintenanceTargets(data.targets || []);
         } else if (data.type === 'duty_update') {
           // duty updates are handled by the DutyDispatchCenter component via polling
+        } else if (data.type === 'capacity_deviation_alert') {
+          setCapacityDeviationAlerts(prev => {
+            const next = [data.alert, ...prev];
+            return next.slice(0, 100);
+          });
+          setCapacityUpdate(n => n + 1);
+        } else if (data.type === 'capacity_snapshot') {
+          if (data.deviation_alerts) {
+            setCapacityDeviationAlerts(data.deviation_alerts);
+          }
+          setCapacityUpdate(n => n + 1);
         }
       };
 
@@ -386,6 +399,8 @@ export function useWebSocket() {
     targets,
     groups,
     alerts,
+    capacityDeviationAlerts,
+    capacityUpdate,
     dependencies,
     observers,
     observationMatrix,
