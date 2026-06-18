@@ -2,8 +2,8 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from .models import (
-    ComplianceReport, AuditLog, ProbeTarget, ProbeResult, Alert,
-    Incident, MaintenanceWindow
+    ComplianceReport, AuditLog, ProbeTarget, ProbeResult, ObserverProbeResult,
+    Alert, Incident, MaintenanceWindow
 )
 import statistics
 
@@ -76,39 +76,63 @@ class ComplianceEngine:
         fully_covered = 0
         partially_covered = 0
         not_covered = 0
+        paused_targets = 0
         uncovered_targets = []
 
         period_duration = (end_time - start_time).total_seconds()
 
         for target in targets:
-            results_in_period = db.query(ProbeResult).filter(
+            if target.paused:
+                paused_targets += 1
+                continue
+
+            pr_count = db.query(ProbeResult).filter(
                 ProbeResult.target_id == target.id,
                 ProbeResult.timestamp >= start_time,
                 ProbeResult.timestamp <= end_time
             ).count()
 
-            if results_in_period == 0:
+            opr_count = db.query(ObserverProbeResult).filter(
+                ObserverProbeResult.target_id == target.id,
+                ObserverProbeResult.timestamp >= start_time,
+                ObserverProbeResult.timestamp <= end_time
+            ).count()
+
+            total_results = pr_count + opr_count
+
+            if total_results == 0:
                 not_covered += 1
                 uncovered_targets.append({
                     "id": target.id,
                     "name": target.name,
                     "type": target.type,
                     "paused": target.paused,
+                    "last_check": target.last_check.isoformat() if target.last_check else None,
+                    "status": target.status,
                 })
             else:
                 expected_interval = target.interval or 30
                 expected_count = period_duration / expected_interval
-                coverage_ratio = results_in_period / expected_count if expected_count > 0 else 0
+                if expected_count <= 0:
+                    expected_count = 1
 
-                if coverage_ratio >= 0.9:
+                coverage_ratio = min(total_results / expected_count, 1.0)
+
+                if coverage_ratio >= 0.5 or total_results >= 10:
                     fully_covered += 1
                 else:
                     partially_covered += 1
 
-        coverage_rate = (fully_covered + partially_covered * 0.5) / total_targets * 100 if total_targets > 0 else 0
+        active_targets = total_targets - paused_targets
+        if active_targets > 0:
+            coverage_rate = (fully_covered + partially_covered * 0.5) / active_targets * 100
+        else:
+            coverage_rate = 100.0 if total_targets > 0 else 0.0
 
         return {
             "total_targets": total_targets,
+            "active_targets": active_targets,
+            "paused_targets": paused_targets,
             "fully_covered": fully_covered,
             "partially_covered": partially_covered,
             "not_covered": not_covered,

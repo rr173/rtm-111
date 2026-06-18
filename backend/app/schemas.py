@@ -1576,6 +1576,8 @@ class ComplianceReportSummary(BaseModel):
 
 class ProbeCoverageDetail(BaseModel):
     total_targets: int = 0
+    active_targets: int = 0
+    paused_targets: int = 0
     fully_covered: int = 0
     partially_covered: int = 0
     not_covered: int = 0

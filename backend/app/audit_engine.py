@@ -40,26 +40,50 @@ class AuditEngine:
     def __init__(self):
         pass
 
-    def _serialize_value(self, value: Any) -> Optional[Dict[str, Any]]:
+    def _serialize_value(self, value: Any) -> Any:
         if value is None:
             return None
-        if isinstance(value, dict):
+
+        if isinstance(value, (str, int, float, bool)):
             return value
+
+        if isinstance(value, datetime):
+            return value.isoformat()
+
+        if isinstance(value, dict):
+            result = {}
+            for key, val in value.items():
+                try:
+                    result[key] = self._serialize_value(val)
+                except Exception:
+                    result[key] = str(val)
+            return result
+
+        if isinstance(value, (list, tuple)):
+            result = []
+            for item in value:
+                try:
+                    result.append(self._serialize_value(item))
+                except Exception:
+                    result.append(str(item))
+            return result
+
         if hasattr(value, '__dict__'):
             result = {}
             for key, val in value.__dict__.items():
                 if key.startswith('_'):
                     continue
-                if isinstance(val, datetime):
-                    result[key] = val.isoformat()
-                else:
-                    try:
-                        json.dumps(val)
-                        result[key] = val
-                    except (TypeError, ValueError):
-                        result[key] = str(val)
+                try:
+                    result[key] = self._serialize_value(val)
+                except Exception:
+                    result[key] = str(val)
             return result
-        return {"value": str(value)}
+
+        try:
+            json.dumps(value)
+            return value
+        except (TypeError, ValueError):
+            return str(value)
 
     def log_operation(
         self,

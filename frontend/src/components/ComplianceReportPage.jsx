@@ -55,6 +55,17 @@ function ComplianceReportPage() {
   const [generateEndDate, setGenerateEndDate] = useState('');
   const [generating, setGenerating] = useState(false);
 
+  const openGenerateModal = () => {
+    const end = new Date();
+    const start = new Date();
+    start.setDate(start.getDate() - 7);
+    
+    const formatDate = (d) => d.toISOString().split('T')[0];
+    setGenerateStartDate(formatDate(start));
+    setGenerateEndDate(formatDate(end));
+    setShowGenerateModal(true);
+  };
+
   const loadReports = useCallback(async () => {
     try {
       setLoading(true);
@@ -106,8 +117,8 @@ function ComplianceReportPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          start_time: generateStartDate,
-          end_time: generateEndDate,
+          start_time: `${generateStartDate}T00:00:00`,
+          end_time: `${generateEndDate}T23:59:59`,
         }),
       });
 
@@ -185,7 +196,7 @@ function ComplianceReportPage() {
       <div className="page-header">
         <h2>📊 合规报告</h2>
         <p className="page-subtitle">探测覆盖率、告警响应率、MTTR等合规指标分析</p>
-        <button className="btn btn-primary" onClick={() => setShowGenerateModal(true)}>
+        <button className="btn btn-primary" onClick={openGenerateModal}>
           ➕ 生成报告
         </button>
       </div>
@@ -216,7 +227,7 @@ function ComplianceReportPage() {
           <div className="empty-state">
             <div className="empty-icon">📊</div>
             <p>暂无合规报告</p>
-            <button className="btn btn-primary" onClick={() => setShowGenerateModal(true)}>
+            <button className="btn btn-primary" onClick={openGenerateModal}>
               生成第一份报告
             </button>
           </div>
@@ -239,25 +250,25 @@ function ComplianceReportPage() {
                     <div className="metric-item">
                       <span className="metric-label">探测覆盖率</span>
                       <span className="metric-value coverage">
-                        {report.summary?.probe_coverage_rate ? (report.summary.probe_coverage_rate * 100).toFixed(1) : 0}%
+                        {report.probe_coverage?.coverage_rate ? report.probe_coverage.coverage_rate.toFixed(1) : 0}%
                       </span>
                     </div>
                     <div className="metric-item">
                       <span className="metric-label">告警响应率</span>
                       <span className="metric-value response">
-                        {report.summary?.alert_response_rate ? (report.summary.alert_response_rate * 100).toFixed(1) : 0}%
+                        {report.alert_response?.acknowledgment_rate ? report.alert_response.acknowledgment_rate.toFixed(1) : 0}%
                       </span>
                     </div>
                     <div className="metric-item">
                       <span className="metric-label">平均恢复时间</span>
                       <span className="metric-value mttr">
-                        {formatDuration(report.summary?.avg_mttr_seconds)}
+                        {formatDuration(report.mttr?.avg_recovery_seconds)}
                       </span>
                     </div>
                     <div className="metric-item">
                       <span className="metric-label">配置变更次数</span>
                       <span className="metric-value changes">
-                        {report.summary?.total_changes || 0}
+                        {report.config_changes?.total_changes || 0}
                       </span>
                     </div>
                   </div>
@@ -384,13 +395,13 @@ function ComplianceReportPage() {
                       <div className="metric-content">
                         <div className="metric-value-large">
                           {selectedReport.probe_coverage?.coverage_rate
-                            ? (selectedReport.probe_coverage.coverage_rate * 100).toFixed(1)
+                            ? selectedReport.probe_coverage.coverage_rate.toFixed(1)
                             : 0}%
                         </div>
                         <div className="metric-label">探测覆盖率</div>
                         <div className="metric-subtext">
-                          {selectedReport.probe_coverage?.total_targets || 0} 个目标中
-                          {selectedReport.probe_coverage?.healthy_targets || 0} 个持续可用
+                          {selectedReport.probe_coverage?.active_targets || 0} 个活跃目标中
+                          {selectedReport.probe_coverage?.fully_covered || 0} 个完全覆盖
                         </div>
                       </div>
                     </div>
@@ -399,14 +410,14 @@ function ComplianceReportPage() {
                       <div className="metric-icon">⚡</div>
                       <div className="metric-content">
                         <div className="metric-value-large">
-                          {selectedReport.alert_response?.response_rate
-                            ? (selectedReport.alert_response.response_rate * 100).toFixed(1)
+                          {selectedReport.alert_response?.acknowledgment_rate
+                            ? selectedReport.alert_response.acknowledgment_rate.toFixed(1)
                             : 0}%
                         </div>
                         <div className="metric-label">告警响应率</div>
                         <div className="metric-subtext">
-                          {selectedReport.alert_response?.acknowledged || 0} /
-                          {selectedReport.alert_response?.total || 0} 条告警已确认
+                          {selectedReport.alert_response?.acknowledged_alerts || 0} /
+                          {selectedReport.alert_response?.total_alerts || 0} 条告警已确认
                         </div>
                       </div>
                     </div>
@@ -415,11 +426,11 @@ function ComplianceReportPage() {
                       <div className="metric-icon">⏱️</div>
                       <div className="metric-content">
                         <div className="metric-value-large">
-                          {formatDuration(selectedReport.mttr?.avg_mttr_seconds)}
+                          {formatDuration(selectedReport.mttr?.avg_recovery_seconds)}
                         </div>
                         <div className="metric-label">平均故障恢复时间</div>
                         <div className="metric-subtext">
-                          基于 {selectedReport.mttr?.incident_count || 0} 个故障事件计算
+                          基于 {selectedReport.mttr?.total_incidents || 0} 个故障事件计算
                         </div>
                       </div>
                     </div>
@@ -432,7 +443,7 @@ function ComplianceReportPage() {
                         </div>
                         <div className="metric-label">配置变更次数</div>
                         <div className="metric-subtext">
-                          涉及 {selectedReport.config_changes?.affected_targets || 0} 个目标
+                          {selectedReport.top_changed_targets?.length || 0} 个目标有变更
                         </div>
                       </div>
                     </div>
