@@ -1645,3 +1645,82 @@ class GenerateReportRequest(BaseModel):
     start_time: datetime
     end_time: datetime
     report_type: Optional[str] = "custom"
+
+
+class HealthScoreResponse(BaseModel):
+    id: int
+    target_id: int
+    target_name: str
+    group_id: Optional[int] = None
+    group_name: Optional[str] = None
+    overall_score: float
+    availability_score: float
+    latency_score: float
+    alert_score: float
+    stability_score: float
+    availability_weight: float
+    latency_weight: float
+    alert_weight: float
+    stability_weight: float
+    availability_7d: Optional[float] = None
+    avg_latency_ms: Optional[float] = None
+    latency_threshold_ms: Optional[float] = None
+    alert_count_7d: Optional[int] = None
+    consecutive_healthy_hours: Optional[int] = None
+    previous_score: Optional[float] = None
+    score_trend: str
+    last_calculated_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class HealthScoreHistoryResponse(BaseModel):
+    id: int
+    target_id: int
+    target_name: str
+    group_id: Optional[int] = None
+    group_name: Optional[str] = None
+    overall_score: float
+    availability_score: float
+    latency_score: float
+    alert_score: float
+    stability_score: float
+    availability_7d: Optional[float] = None
+    avg_latency_ms: Optional[float] = None
+    alert_count_7d: Optional[int] = None
+    consecutive_healthy_hours: Optional[int] = None
+    snapshot_hour: datetime
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class HealthRankingSnapshotResponse(BaseModel):
+    id: int
+    snapshot_time: datetime
+    total_targets: int
+    avg_score: float
+    data: List[Dict[str, Any]] = []
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class HealthRankingResponse(BaseModel):
+    scores: List[HealthScoreResponse] = []
+    total: int = 0
+    avg_score: float = 0.0
+
+
+class HealthScoreDetailResponse(BaseModel):
+    current: HealthScoreResponse
+    history_7d: List[HealthScoreHistoryResponse] = []
+
+
+class TriggerHealthScoreRequest(BaseModel):
+    target_ids: Optional[List[int]] = None

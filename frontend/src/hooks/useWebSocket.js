@@ -44,6 +44,8 @@ export function useWebSocket() {
   const [playbackFinished, setPlaybackFinished] = useState(null);
   const [maintenanceWindows, setMaintenanceWindows] = useState([]);
   const [maintenanceTargets, setMaintenanceTargets] = useState([]);
+  const [healthScores, setHealthScores] = useState([]);
+  const [healthScoresUpdate, setHealthScoresUpdate] = useState(0);
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const resultsRef = useRef({});
@@ -111,6 +113,16 @@ export function useWebSocket() {
         }
       } catch (e) {
         console.error('Failed to load maintenance windows:', e);
+      }
+
+      try {
+        const healthRes = await fetch(`${apiBase}/api/health/scores?sort_order=asc`);
+        if (healthRes.ok) {
+          const healthData = await healthRes.json();
+          setHealthScores(healthData.scores || []);
+        }
+      } catch (e) {
+        console.error('Failed to load health scores:', e);
       }
     } catch (e) {
       console.error('Failed to load initial data:', e);
@@ -286,6 +298,9 @@ export function useWebSocket() {
             setCapacityDeviationAlerts(data.deviation_alerts);
           }
           setCapacityUpdate(n => n + 1);
+        } else if (data.type === 'health_scores_update') {
+          setHealthScores(data.scores || []);
+          setHealthScoresUpdate(n => n + 1);
         }
       };
 
@@ -414,6 +429,8 @@ export function useWebSocket() {
     playbackFinished,
     maintenanceWindows,
     maintenanceTargets,
+    healthScores,
+    healthScoresUpdate,
     getResults,
     getRoundResults,
     setTargets: setTargetsData,
@@ -427,6 +444,7 @@ export function useWebSocket() {
     setIncidents: setIncidentsData,
     setMaintenanceWindows: setMaintenanceWindowsData,
     setMaintenanceTargets: setMaintenanceTargetsData,
+    setHealthScores,
     setPlaybackFinished,
     loadInitialData,
     loadMaintenanceData,

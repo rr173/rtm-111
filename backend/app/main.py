@@ -23,6 +23,7 @@ from .models import (
     CapacityConfig, CapacityHourlySnapshot, CapacityAlert, CapacityPlan,
     CapacityBaseline, CapacityDeviationAlert,
     AuditLog, ComplianceReport,
+    HealthScore, HealthScoreHistory, HealthRankingSnapshot,
 )
 from .schemas import (
     ProbeTargetCreate, ProbeTargetUpdate, ProbeTargetResponse,
@@ -70,6 +71,9 @@ from .schemas import (
     AuditLogResponse, AuditLogListResponse,
     ComplianceReportResponse, ComplianceReportListResponse,
     GenerateReportRequest,
+    HealthScoreResponse, HealthScoreHistoryResponse,
+    HealthRankingSnapshotResponse, HealthRankingResponse,
+    HealthScoreDetailResponse, TriggerHealthScoreRequest,
 )
 from .observer_engine import observer_engine
 from .probe_engine import probe_engine
@@ -81,6 +85,7 @@ from .maintenance_engine import maintenance_engine
 from .duty_engine import duty_engine
 from .audit_engine import audit_engine
 from .compliance_engine import compliance_engine
+from .health_engine import health_engine
 from pydantic import BaseModel
 from typing import List as TypingList
 
@@ -1326,6 +1331,7 @@ async def startup_event():
     playback_engine.set_loop(loop)
     maintenance_engine.set_loop(loop)
     duty_engine.set_loop(loop)
+    health_engine.set_loop(loop)
 
     if os.getenv("RESET_DEMO_DATA", "false").lower() == "true":
         db_path = "./data/probes.db"
@@ -1349,6 +1355,7 @@ async def startup_event():
     _init_demo_capacity()
     _init_demo_audit()
     _init_demo_compliance_reports()
+    _init_demo_health_scores()
     incident_engine.attach_callbacks()
     maintenance_engine.register_status_callback(lambda data: manager.broadcast_maintenance_update())
     await observer_engine.start()
@@ -1357,6 +1364,8 @@ async def startup_event():
     await maintenance_engine.start()
     duty_engine.register_alert_callback(lambda: manager.broadcast_duty_update())
     await duty_engine.start()
+    health_engine.register_update_callback(lambda: manager.broadcast_health_update())
+    await health_engine.start()
 
     asyncio.create_task(_capacity_snapshot_loop())
 
@@ -1368,6 +1377,7 @@ async def shutdown_event():
     await sync_engine.stop()
     await maintenance_engine.stop()
     await duty_engine.stop()
+    await health_engine.stop()
 
 
 def _init_demo_slo():
@@ -8685,4 +8695,159 @@ def generate_monthly_report(request: Request, db: Session = Depends(get_db)):
     operator = _get_operator_from_request(request)
     report = compliance_engine.generate_monthly_report(db, generated_by=operator)
     return report
+
+
+@app.get("/api/health/scores", response_model=HealthRankingResponse)
+def get_health_scores(
+    group_id: Optional[int] = None,
+    min_score: Optional[float] = None,
+    sort_order: str = "asc",
+    limit: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    query = db.query(HealthScore)
+
+    if group_id is not None:
+        query = query.filter(HealthScore.group_id == group_id)
+
+    if min_score is not None:
+        query = query.filter(HealthScore.overall_score < min_score)
+
+    if sort_order == "asc":
+        query = query.order_by(HealthScore.overall_score.asc())
+    else:
+        query = query.order_by(HealthScore.overall_score.desc())
+
+    if limit:
+        query = query.limit(limit)
+
+    scores = query.all()
+    total = db.query(HealthScore).count()
+    avg_score = 0.0
+    if total > 0:
+        all_scores = db.query(HealthScore).all()
+        avg_score = sum(s.overall_score for s in all_scores) / total
+
+    return HealthRankingResponse(
+        scores=scores,
+        total=total,
+        avg_score=round(avg_score, 1),
+    )
+
+
+@app.get("/api/health/scores/{target_id}", response_model=HealthScoreDetailResponse)
+def get_target_health_score(target_id: int, db: Session = Depends(get_db)):
+    current = db.query(HealthScore).filter(HealthScore.target_id == target_id).first()
+    if not current:
+        raise HTTPException(status_code=404, detail="Health score not found for this target")
+
+    history_7d = health_engine.get_target_health_history(target_id, days=7)
+
+    return HealthScoreDetailResponse(
+        current=current,
+        history_7d=history_7d,
+    )
+
+
+@app.get("/api/health/scores/{target_id}/history")
+def get_target_health_history(target_id: int, days: int = 7, db: Session = Depends(get_db)):
+    history = health_engine.get_target_health_history(target_id, days=days)
+    return {
+        "target_id": target_id,
+        "days": days,
+        "history": history,
+    }
+
+
+@app.get("/api/health/ranking/snapshots")
+def get_health_ranking_snapshots(date: Optional[str] = None, days: int = 7, db: Session = Depends(get_db)):
+    snapshots = health_engine.get_ranking_snapshots(date=date, days=days)
+    return {
+        "snapshots": snapshots,
+        "total": len(snapshots),
+    }
+
+
+@app.get("/api/health/ranking/snapshots/{snapshot_id}")
+def get_health_ranking_snapshot(snapshot_id: int, db: Session = Depends(get_db)):
+    snapshot = db.query(HealthRankingSnapshot).filter(HealthRankingSnapshot.id == snapshot_id).first()
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Ranking snapshot not found")
+    return snapshot
+
+
+@app.post("/api/health/scores/calculate")
+def calculate_health_scores(request: TriggerHealthScoreRequest, db: Session = Depends(get_db)):
+    if request.target_ids:
+        for target_id in request.target_ids:
+            target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+            if target:
+                health_engine.calculate_target_score(db, target)
+        db.commit()
+    else:
+        health_engine.calculate_all_scores()
+    return {"ok": True, "message": "Health scores calculated successfully"}
+
+
+def _init_demo_health_scores():
+    db = next(get_db())
+    try:
+        existing_scores = db.query(HealthScore).first()
+        if existing_scores:
+            return
+
+        targets = db.query(ProbeTarget).filter(
+            ProbeTarget.paused == False,
+            ProbeTarget.deprecated == False
+        ).all()
+
+        if not targets:
+            return
+
+        now = datetime.utcnow()
+        total_hours = 24 * 7
+
+        for target in targets:
+            base_score = 60 + (hash(f"health_base_{target.id}") % 40)
+            volatility = hash(f"health_vol_{target.id}") % 20
+
+            for hour_offset in range(total_hours, 0, -1):
+                hour_time = (now - timedelta(hours=hour_offset)).replace(minute=0, second=0, microsecond=0)
+                variation = (hash(f"health_var_{target.id}_{hour_offset}") % 100) / 100 * volatility - volatility / 2
+                overall = max(0.0, min(100.0, base_score + variation))
+                availability = max(0.0, min(100.0, base_score + 10 + variation * 0.5))
+                latency = max(0.0, min(100.0, base_score - 5 + variation * 0.8))
+                alert = max(0.0, min(100.0, base_score + 5 + variation * 0.6))
+                stability = max(0.0, min(100.0, base_score - 10 + variation * 0.7))
+
+                history = HealthScoreHistory(
+                    target_id=target.id,
+                    target_name=target.name,
+                    group_id=target.group_id,
+                    group_name=target.group.name if target.group else None,
+                    overall_score=round(overall, 1),
+                    availability_score=round(availability, 1),
+                    latency_score=round(latency, 1),
+                    alert_score=round(alert, 1),
+                    stability_score=round(stability, 1),
+                    availability_7d=round(95 + (hash(f"avail_{target.id}_{hour_offset}") % 50) / 10, 2),
+                    avg_latency_ms=round(100 + (hash(f"lat_{target.id}_{hour_offset}") % 400), 1),
+                    alert_count_7d=hash(f"alerts_{target.id}_{hour_offset}") % 15,
+                    consecutive_healthy_hours=hash(f"consec_{target.id}_{hour_offset}") % 120,
+                    snapshot_hour=hour_time,
+                )
+                db.add(history)
+
+        db.commit()
+
+        health_engine.calculate_all_scores()
+
+        print(f"Demo health scores initialized for {len(targets)} targets")
+    except Exception as e:
+        print(f"Error initializing demo health scores: {e}")
+        import traceback
+        traceback.print_exc()
+        db.rollback()
+    finally:
+        db.close()
 

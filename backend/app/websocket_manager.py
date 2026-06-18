@@ -535,6 +535,40 @@ class ConnectionManager:
         finally:
             db.close()
 
+    def broadcast_health_update(self):
+        from .health_engine import health_engine
+        from .models import HealthScore
+        db = SessionLocal()
+        try:
+            scores = db.query(HealthScore).order_by(HealthScore.overall_score.asc()).all()
+            items = []
+            for s in scores:
+                items.append({
+                    "id": s.id,
+                    "target_id": s.target_id,
+                    "target_name": s.target_name,
+                    "group_id": s.group_id,
+                    "group_name": s.group_name,
+                    "overall_score": s.overall_score,
+                    "availability_score": s.availability_score,
+                    "latency_score": s.latency_score,
+                    "alert_score": s.alert_score,
+                    "stability_score": s.stability_score,
+                    "availability_7d": s.availability_7d,
+                    "avg_latency_ms": s.avg_latency_ms,
+                    "alert_count_7d": s.alert_count_7d,
+                    "consecutive_healthy_hours": s.consecutive_healthy_hours,
+                    "previous_score": s.previous_score,
+                    "score_trend": s.score_trend,
+                    "last_calculated_at": s.last_calculated_at.isoformat() if s.last_calculated_at else None,
+                })
+            self._safe_broadcast({
+                "type": "health_scores_update",
+                "scores": items,
+            })
+        finally:
+            db.close()
+
     async def _broadcast(self, message: dict):
         dead_connections = []
         for connection in list(self.active_connections):

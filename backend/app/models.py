@@ -856,3 +856,68 @@ class ComplianceReport(Base):
 
     class Config:
         from_attributes = True
+
+
+class HealthScore(Base):
+    __tablename__ = "health_scores"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False, unique=True, index=True)
+    target_name = Column(String(255), nullable=False)
+    group_id = Column(Integer, ForeignKey("probe_groups.id"), nullable=True)
+    group_name = Column(String(255), nullable=True)
+    overall_score = Column(Float, nullable=False, default=0)
+    availability_score = Column(Float, nullable=False, default=0)
+    latency_score = Column(Float, nullable=False, default=0)
+    alert_score = Column(Float, nullable=False, default=0)
+    stability_score = Column(Float, nullable=False, default=0)
+    availability_weight = Column(Float, nullable=False, default=0.4)
+    latency_weight = Column(Float, nullable=False, default=0.2)
+    alert_weight = Column(Float, nullable=False, default=0.2)
+    stability_weight = Column(Float, nullable=False, default=0.2)
+    availability_7d = Column(Float, nullable=True)
+    avg_latency_ms = Column(Float, nullable=True)
+    latency_threshold_ms = Column(Float, nullable=True)
+    alert_count_7d = Column(Integer, nullable=True)
+    consecutive_healthy_hours = Column(Integer, nullable=True)
+    previous_score = Column(Float, nullable=True)
+    score_trend = Column(String(20), default="flat")
+    last_calculated_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    target = relationship("ProbeTarget", backref="health_score")
+
+
+class HealthScoreHistory(Base):
+    __tablename__ = "health_score_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False, index=True)
+    target_name = Column(String(255), nullable=False)
+    group_id = Column(Integer, ForeignKey("probe_groups.id"), nullable=True)
+    group_name = Column(String(255), nullable=True)
+    overall_score = Column(Float, nullable=False, default=0)
+    availability_score = Column(Float, nullable=False, default=0)
+    latency_score = Column(Float, nullable=False, default=0)
+    alert_score = Column(Float, nullable=False, default=0)
+    stability_score = Column(Float, nullable=False, default=0)
+    availability_7d = Column(Float, nullable=True)
+    avg_latency_ms = Column(Float, nullable=True)
+    alert_count_7d = Column(Integer, nullable=True)
+    consecutive_healthy_hours = Column(Integer, nullable=True)
+    snapshot_hour = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    target = relationship("ProbeTarget", backref="health_score_history")
+
+
+class HealthRankingSnapshot(Base):
+    __tablename__ = "health_ranking_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    snapshot_time = Column(DateTime, nullable=False, index=True)
+    total_targets = Column(Integer, nullable=False, default=0)
+    avg_score = Column(Float, nullable=False, default=0)
+    data = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)

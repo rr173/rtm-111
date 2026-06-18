@@ -21,6 +21,7 @@ import DutyDispatchCenter from './components/DutyDispatchCenter';
 import CapacityMonitor from './components/CapacityMonitor';
 import AuditLogPage from './components/AuditLogPage';
 import ComplianceReportPage from './components/ComplianceReportPage';
+import HealthRankingPanel from './components/HealthRankingPanel';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
@@ -51,6 +52,7 @@ function App() {
     maintenanceWindows,
     maintenanceTargets,
     loadMaintenanceData,
+    healthScores,
   } = useWebSocket();
   const [activeTab, setActiveTab] = useState('list');
   const [expandedTarget, setExpandedTarget] = useState(null);
@@ -352,6 +354,10 @@ function App() {
                 partial={partialCount}
                 degraded={degradedCount}
                 down={downCount}
+              />
+              <HealthRankingPanel
+                scores={healthScores}
+                groups={groups}
               />
               <TargetList
                 targets={targets}
