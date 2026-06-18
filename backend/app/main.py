@@ -56,6 +56,7 @@ from .schemas import (
     DispatchedAlertResponse, DispatchAcknowledge, DispatchResolve,
     DutyOverviewResponse, DutyCalendarWeek, DutyPersonHistoryResponse,
     CapacityConfigCreate, CapacityConfigUpdate, CapacityConfigResponse,
+    CapacityGroupConfigCreate,
     CapacityOverviewItem, CapacityOverviewResponse,
     CapacityHourlyPoint, CapacityHeatmapCell,
     CapacityPredictionResult, CapacityPlanCreate, CapacityPlanUpdate, CapacityPlanResponse,
@@ -1099,6 +1100,72 @@ app.add_middleware(
 )
 
 
+async def _capacity_snapshot_loop():
+    import asyncio
+    await asyncio.sleep(60)
+    while True:
+        try:
+            db = next(get_db())
+            try:
+                _compute_capacity_snapshots_sync(db)
+            finally:
+                db.close()
+        except Exception as e:
+            print(f"Capacity snapshot loop error: {e}")
+        await asyncio.sleep(300)
+
+
+def _compute_capacity_snapshots_sync(db):
+    targets = db.query(ProbeTarget).all()
+    for target in targets:
+        config = _get_effective_capacity_config(db, target.id)
+        if not config:
+            continue
+
+        current_hour = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+        existing = db.query(CapacityHourlySnapshot).filter(
+            CapacityHourlySnapshot.target_id == target.id,
+            CapacityHourlySnapshot.hour == current_hour
+        ).first()
+
+        one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+        results = db.query(ProbeResult).filter(
+            ProbeResult.target_id == target.id,
+            ProbeResult.checked_at >= one_hour_ago
+        ).all()
+
+        if not results:
+            continue
+
+        avg_latency = sum(r.response_time or 0 for r in results) / len(results)
+        success_rate = sum(1 for r in results if r.is_up) / len(results)
+        request_count = len(results)
+
+        utils = _calculate_utilization(avg_latency, success_rate, request_count, config)
+
+        if existing:
+            existing.avg_latency_ms = avg_latency
+            existing.success_rate = success_rate
+            existing.request_count = request_count
+            existing.latency_utilization = utils["latency_utilization"]
+            existing.connection_utilization = utils["connection_utilization"]
+            existing.throughput_utilization = utils["throughput_utilization"]
+            existing.overall_utilization = utils["overall_utilization"]
+        else:
+            snapshot = CapacityHourlySnapshot(
+                target_id=target.id,
+                hour=current_hour,
+                avg_latency_ms=avg_latency,
+                success_rate=success_rate,
+                request_count=request_count,
+                **utils,
+            )
+            db.add(snapshot)
+
+    db.commit()
+    _generate_capacity_alerts(db)
+
+
 @app.on_event("startup")
 async def startup_event():
     import asyncio
@@ -1140,6 +1207,8 @@ async def startup_event():
     await maintenance_engine.start()
     duty_engine.register_alert_callback(lambda: manager.broadcast_duty_update())
     await duty_engine.start()
+
+    asyncio.create_task(_capacity_snapshot_loop())
 
 
 @app.on_event("shutdown")
@@ -7329,11 +7398,10 @@ def compute_capacity_snapshots(db: Session = Depends(get_db)):
             CapacityHourlySnapshot.hour == current_hour
         ).first()
 
-        last_hour = current_hour - timedelta(hours=1)
+        one_hour_ago = datetime.utcnow() - timedelta(hours=1)
         results = db.query(ProbeResult).filter(
             ProbeResult.target_id == target.id,
-            ProbeResult.checked_at >= last_hour,
-            ProbeResult.checked_at < current_hour
+            ProbeResult.checked_at >= one_hour_ago
         ).all()
 
         if not results:
@@ -7436,7 +7504,7 @@ def _generate_capacity_alerts(db: Session):
 
 
 @app.post("/api/capacity/group-configs/{group_id}")
-def apply_group_capacity_config(group_id: int, data: CapacityConfigCreate, db: Session = Depends(get_db)):
+def apply_group_capacity_config(group_id: int, data: CapacityGroupConfigCreate, db: Session = Depends(get_db)):
     group = db.query(ProbeGroup).filter(ProbeGroup.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")

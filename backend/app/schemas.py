@@ -1339,6 +1339,12 @@ class CapacityConfigCreate(BaseModel):
         return self
 
 
+class CapacityGroupConfigCreate(BaseModel):
+    max_connections: Optional[int] = None
+    max_latency_ms: float = 500.0
+    max_throughput_rps: Optional[float] = None
+
+
 class CapacityConfigUpdate(BaseModel):
     max_connections: Optional[int] = None
     max_latency_ms: Optional[float] = None
