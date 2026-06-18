@@ -1322,3 +1322,137 @@ class DutyPersonHistoryResponse(BaseModel):
     total_resolved: int = 0
     avg_response_seconds: Optional[float] = None
     alerts: List[DispatchedAlertResponse] = []
+
+
+class CapacityConfigCreate(BaseModel):
+    target_id: Optional[int] = None
+    group_id: Optional[int] = None
+    max_connections: Optional[int] = None
+    max_latency_ms: float = 500.0
+    max_throughput_rps: Optional[float] = None
+    is_override: bool = False
+
+    @model_validator(mode='after')
+    def check_target_or_group(self):
+        if self.target_id is None and self.group_id is None:
+            raise ValueError('必须指定 target_id 或 group_id 其中之一')
+        return self
+
+
+class CapacityConfigUpdate(BaseModel):
+    max_connections: Optional[int] = None
+    max_latency_ms: Optional[float] = None
+    max_throughput_rps: Optional[float] = None
+
+
+class CapacityConfigResponse(BaseModel):
+    id: int
+    target_id: Optional[int] = None
+    group_id: Optional[int] = None
+    max_connections: Optional[int] = None
+    max_latency_ms: float
+    max_throughput_rps: Optional[float] = None
+    is_override: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class CapacityOverviewItem(BaseModel):
+    target_id: int
+    target_name: str
+    group_name: Optional[str] = None
+    current_water_level: float
+    latency_utilization: float
+    connection_utilization: float
+    throughput_utilization: float
+    water_level_status: str
+    has_capacity_config: bool
+    predicted_breach_85_at: Optional[datetime] = None
+    predicted_breach_100_at: Optional[datetime] = None
+
+
+class CapacityOverviewResponse(BaseModel):
+    targets: List[CapacityOverviewItem] = []
+    active_alerts: int = 0
+    total_targets: int = 0
+    configured_targets: int = 0
+
+
+class CapacityHourlyPoint(BaseModel):
+    hour: Optional[datetime] = None
+    overall_utilization: float = 0.0
+    latency_utilization: float = 0.0
+    connection_utilization: float = 0.0
+    throughput_utilization: float = 0.0
+
+
+class CapacityHeatmapCell(BaseModel):
+    date: str
+    hour: int
+    utilization: float
+
+
+class CapacityPredictionResult(BaseModel):
+    predicted_breach_85_at: Optional[datetime] = None
+    predicted_breach_100_at: Optional[datetime] = None
+    prediction_points: List[CapacityHourlyPoint] = []
+    slope: float = 0.0
+    current_trend: str = "stable"
+
+
+class CapacityPlanCreate(BaseModel):
+    target_id: int
+    planned_expansion_at: datetime
+    target_capacity_multiplier: float = Field(2.0, ge=1.0, le=10.0)
+    notes: Optional[str] = None
+
+
+class CapacityPlanUpdate(BaseModel):
+    planned_expansion_at: Optional[datetime] = None
+    target_capacity_multiplier: Optional[float] = Field(None, ge=1.0, le=10.0)
+    notes: Optional[str] = None
+
+
+class CapacityPlanResponse(BaseModel):
+    id: int
+    target_id: int
+    planned_expansion_at: datetime
+    target_capacity_multiplier: float
+    notes: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class CapacityAlertResponse(BaseModel):
+    id: int
+    target_id: int
+    target_name: str
+    current_water_level: float
+    predicted_breach_85_at: Optional[datetime] = None
+    predicted_breach_100_at: Optional[datetime] = None
+    suggested_expansion: Optional[float] = None
+    is_active: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class CapacityDetailResponse(BaseModel):
+    target_id: int
+    target_name: str
+    group_name: Optional[str] = None
+    config: Optional[CapacityConfigResponse] = None
+    current_water_level: float
+    water_level_status: str
+    trend: List[CapacityHourlyPoint] = []
+    heatmap: List[CapacityHeatmapCell] = []
+    prediction: Optional[CapacityPredictionResult] = None
+    plans: List[CapacityPlanResponse] = []
+    alerts: List[CapacityAlertResponse] = []

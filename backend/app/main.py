@@ -18,6 +18,7 @@ from .models import (
     RegistrySource, SyncEvent, SyncEventDetail,
     MaintenanceWindow, MaintenanceWindowEvent,
     DutySchedule, DutySlot, DutySwap, DispatchedAlert,
+    CapacityConfig, CapacityHourlySnapshot, CapacityAlert, CapacityPlan,
 )
 from .schemas import (
     ProbeTargetCreate, ProbeTargetUpdate, ProbeTargetResponse,
@@ -54,6 +55,11 @@ from .schemas import (
     DutyScheduleCreate, DutyScheduleUpdate, DutyScheduleResponse,
     DispatchedAlertResponse, DispatchAcknowledge, DispatchResolve,
     DutyOverviewResponse, DutyCalendarWeek, DutyPersonHistoryResponse,
+    CapacityConfigCreate, CapacityConfigUpdate, CapacityConfigResponse,
+    CapacityOverviewItem, CapacityOverviewResponse,
+    CapacityHourlyPoint, CapacityHeatmapCell,
+    CapacityPredictionResult, CapacityPlanCreate, CapacityPlanUpdate, CapacityPlanResponse,
+    CapacityAlertResponse, CapacityDetailResponse,
 )
 from .observer_engine import observer_engine
 from .probe_engine import probe_engine
@@ -983,8 +989,104 @@ def _migrate_database():
             print(f"Migration error: {e}")
 
 
+def _migrate_capacity_tables():
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        try:
+            capacity_tables = {
+                "capacity_configs": """
+                    CREATE TABLE capacity_configs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        target_id INTEGER,
+                        group_id INTEGER,
+                        max_connections INTEGER,
+                        max_latency_ms REAL NOT NULL DEFAULT 500.0,
+                        max_throughput_rps REAL,
+                        is_override INTEGER DEFAULT 0,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE CASCADE,
+                        FOREIGN KEY (group_id) REFERENCES probe_groups(id) ON DELETE CASCADE
+                    )
+                """,
+                "capacity_hourly_snapshots": """
+                    CREATE TABLE capacity_hourly_snapshots (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        target_id INTEGER NOT NULL,
+                        hour DATETIME NOT NULL,
+                        avg_latency_ms REAL NOT NULL DEFAULT 0,
+                        success_rate REAL NOT NULL DEFAULT 1.0,
+                        request_count INTEGER NOT NULL DEFAULT 0,
+                        latency_utilization REAL NOT NULL DEFAULT 0,
+                        connection_utilization REAL NOT NULL DEFAULT 0,
+                        throughput_utilization REAL NOT NULL DEFAULT 0,
+                        overall_utilization REAL NOT NULL DEFAULT 0,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE CASCADE
+                    )
+                """,
+                "capacity_alerts": """
+                    CREATE TABLE capacity_alerts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        target_id INTEGER NOT NULL,
+                        target_name VARCHAR(255) NOT NULL,
+                        current_water_level REAL NOT NULL,
+                        predicted_breach_85_at DATETIME,
+                        predicted_breach_100_at DATETIME,
+                        suggested_expansion REAL,
+                        is_active INTEGER DEFAULT 1,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE CASCADE
+                    )
+                """,
+                "capacity_plans": """
+                    CREATE TABLE capacity_plans (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        target_id INTEGER NOT NULL,
+                        planned_expansion_at DATETIME NOT NULL,
+                        target_capacity_multiplier REAL NOT NULL DEFAULT 2.0,
+                        notes TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE CASCADE
+                    )
+                """,
+            }
+
+            for table_name, create_sql in capacity_tables.items():
+                result = conn.execute(text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"))
+                if not result.fetchone():
+                    conn.execute(text(create_sql))
+                    index_sqls = {
+                        "capacity_configs": [
+                            "CREATE INDEX idx_cc_target_id ON capacity_configs(target_id)",
+                            "CREATE INDEX idx_cc_group_id ON capacity_configs(group_id)",
+                        ],
+                        "capacity_hourly_snapshots": [
+                            "CREATE INDEX idx_chs_target_id ON capacity_hourly_snapshots(target_id)",
+                            "CREATE INDEX idx_chs_hour ON capacity_hourly_snapshots(hour)",
+                        ],
+                        "capacity_alerts": [
+                            "CREATE INDEX idx_ca_target_id ON capacity_alerts(target_id)",
+                            "CREATE INDEX idx_ca_is_active ON capacity_alerts(is_active)",
+                        ],
+                        "capacity_plans": [
+                            "CREATE INDEX idx_cp_target_id ON capacity_plans(target_id)",
+                        ],
+                    }
+                    if table_name in index_sqls:
+                        for idx_sql in index_sqls[table_name]:
+                            conn.execute(text(idx_sql))
+                    print(f"Created table {table_name}")
+
+            conn.commit()
+        except Exception as e:
+            print(f"Capacity migration error: {e}")
+
+
 _create_tables()
 _migrate_database()
+_migrate_capacity_tables()
 
 app = FastAPI(title="Probe Dashboard API")
 
@@ -1029,6 +1131,7 @@ async def startup_event():
     _init_demo_slo()
     _init_demo_incidents()
     _init_demo_duty()
+    _init_demo_capacity()
     incident_engine.attach_callbacks()
     maintenance_engine.register_status_callback(lambda data: manager.broadcast_maintenance_update())
     await observer_engine.start()
@@ -6783,4 +6886,704 @@ def manual_dispatch_alert(alert_id: int, group_id: int = None, db: Session = Dep
 @app.get("/api/duty/person-history", response_model=DutyPersonHistoryResponse)
 def get_person_history(person: str, limit: int = 50):
     return duty_engine.get_person_history(person=person, limit=limit)
+
+
+def _get_effective_capacity_config(db: Session, target_id: int):
+    target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+    if not target:
+        return None
+    target_config = db.query(CapacityConfig).filter(
+        CapacityConfig.target_id == target_id
+    ).first()
+    if target_config:
+        return target_config
+    if target.group_id:
+        group_config = db.query(CapacityConfig).filter(
+            CapacityConfig.group_id == target.group_id
+        ).first()
+        if group_config:
+            return group_config
+    return None
+
+
+def _calculate_utilization(avg_latency_ms, success_rate, request_count, config):
+    latency_util = min(avg_latency_ms / config.max_latency_ms, 1.0) if config.max_latency_ms else 0.0
+    connection_util = 0.0
+    throughput_util = 0.0
+    overall = latency_util
+    dims = 1
+    if config.max_connections and config.max_connections > 0:
+        est_conn = request_count * 0.3
+        connection_util = min(est_conn / config.max_connections, 1.0)
+        overall += connection_util
+        dims += 1
+    if config.max_throughput_rps and config.max_throughput_rps > 0:
+        est_rps = request_count / 3600.0
+        throughput_util = min(est_rps / config.max_throughput_rps, 1.0)
+        overall += throughput_util
+        dims += 1
+    overall = overall / dims
+    return {
+        "latency_utilization": round(latency_util, 4),
+        "connection_utilization": round(connection_util, 4),
+        "throughput_utilization": round(throughput_util, 4),
+        "overall_utilization": round(overall, 4),
+    }
+
+
+def _linear_regression_predict(data_points):
+    if len(data_points) < 2:
+        return None, None
+    n = len(data_points)
+    x_vals = list(range(n))
+    y_vals = [p[1] for p in data_points]
+    sum_x = sum(x_vals)
+    sum_y = sum(y_vals)
+    sum_xy = sum(x * y for x, y in zip(x_vals, y_vals))
+    sum_x2 = sum(x * x for x in x_vals)
+    denom = n * sum_x2 - sum_x * sum_x
+    if abs(denom) < 1e-10:
+        return 0.0, sum_y / n
+    slope = (n * sum_xy - sum_x * sum_y) / denom
+    intercept = (sum_y - slope * sum_x) / n
+    return slope, intercept
+
+
+def _predict_breach_time(data_points, hours_per_point, threshold):
+    slope, intercept = _linear_regression_predict(data_points)
+    if slope is None:
+        return None
+    if slope <= 0:
+        return None
+    current_x = len(data_points) - 1
+    hours_to_breach = (threshold - intercept) / slope - current_x
+    if hours_to_breach < 0:
+        return datetime.utcnow()
+    return datetime.utcnow() + timedelta(hours=hours_to_breach)
+
+
+@app.get("/api/capacity/overview", response_model=CapacityOverviewResponse)
+def get_capacity_overview(db: Session = Depends(get_db)):
+    targets = db.query(ProbeTarget).all()
+    items = []
+    for target in targets:
+        config = _get_effective_capacity_config(db, target.id)
+        if not config:
+            items.append(CapacityOverviewItem(
+                target_id=target.id,
+                target_name=target.name,
+                group_name=target.group.name if target.group else None,
+                current_water_level=0.0,
+                latency_utilization=0.0,
+                connection_utilization=0.0,
+                throughput_utilization=0.0,
+                water_level_status="green",
+                has_capacity_config=False,
+                predicted_breach_85_at=None,
+                predicted_breach_100_at=None,
+            ))
+            continue
+
+        latest_snapshot = db.query(CapacityHourlySnapshot).filter(
+            CapacityHourlySnapshot.target_id == target.id
+        ).order_by(CapacityHourlySnapshot.hour.desc()).first()
+
+        if latest_snapshot:
+            water_level = latest_snapshot.overall_utilization
+            lat_util = latest_snapshot.latency_utilization
+            conn_util = latest_snapshot.connection_utilization
+            tp_util = latest_snapshot.throughput_utilization
+        else:
+            water_level = 0.0
+            lat_util = 0.0
+            conn_util = 0.0
+            tp_util = 0.0
+
+        if water_level < 0.6:
+            status = "green"
+        elif water_level < 0.85:
+            status = "yellow"
+        else:
+            status = "red"
+
+        snapshots = db.query(CapacityHourlySnapshot).filter(
+            CapacityHourlySnapshot.target_id == target.id,
+            CapacityHourlySnapshot.hour >= datetime.utcnow() - timedelta(days=7)
+        ).order_by(CapacityHourlySnapshot.hour.asc()).all()
+
+        predicted_85 = None
+        predicted_100 = None
+        if len(snapshots) >= 2:
+            data_points = [(i, s.overall_utilization) for i, s in enumerate(snapshots)]
+            predicted_85 = _predict_breach_time(data_points, 1, 0.85)
+            predicted_100 = _predict_breach_time(data_points, 1, 1.0)
+
+        items.append(CapacityOverviewItem(
+            target_id=target.id,
+            target_name=target.name,
+            group_name=target.group.name if target.group else None,
+            current_water_level=round(water_level * 100, 1),
+            latency_utilization=round(lat_util * 100, 1),
+            connection_utilization=round(conn_util * 100, 1),
+            throughput_utilization=round(tp_util * 100, 1),
+            water_level_status=status,
+            has_capacity_config=True,
+            predicted_breach_85_at=predicted_85,
+            predicted_breach_100_at=predicted_100,
+        ))
+
+    active_alerts = db.query(CapacityAlert).filter(CapacityAlert.is_active == True).all()
+
+    return CapacityOverviewResponse(
+        targets=items,
+        active_alerts=len(active_alerts),
+        total_targets=len(targets),
+        configured_targets=len([i for i in items if i.has_capacity_config]),
+    )
+
+
+@app.get("/api/capacity/targets/{target_id}", response_model=CapacityDetailResponse)
+def get_capacity_detail(target_id: int, db: Session = Depends(get_db)):
+    target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    config = _get_effective_capacity_config(db, target_id)
+
+    snapshots = db.query(CapacityHourlySnapshot).filter(
+        CapacityHourlySnapshot.target_id == target_id,
+        CapacityHourlySnapshot.hour >= datetime.utcnow() - timedelta(days=7)
+    ).order_by(CapacityHourlySnapshot.hour.asc()).all()
+
+    trend = [CapacityHourlyPoint(
+        hour=s.hour,
+        overall_utilization=round(s.overall_utilization * 100, 1),
+        latency_utilization=round(s.latency_utilization * 100, 1),
+        connection_utilization=round(s.connection_utilization * 100, 1),
+        throughput_utilization=round(s.throughput_utilization * 100, 1),
+    ) for s in snapshots]
+
+    heatmap_cells = []
+    for s in snapshots:
+        dt = s.hour
+        heatmap_cells.append(CapacityHeatmapCell(
+            date=dt.strftime("%Y-%m-%d"),
+            hour=dt.hour,
+            utilization=round(s.overall_utilization * 100, 1),
+        ))
+
+    prediction = CapacityPredictionResult(
+        predicted_breach_85_at=None,
+        predicted_breach_100_at=None,
+        prediction_points=[],
+        slope=0.0,
+        current_trend="stable",
+    )
+
+    if len(snapshots) >= 2:
+        data_points = [(i, s.overall_utilization) for i, s in enumerate(snapshots)]
+        slope, intercept = _linear_regression_predict(data_points)
+        if slope is not None:
+            prediction.slope = round(slope, 6)
+            if slope > 0.005:
+                prediction.current_trend = "rising"
+            elif slope < -0.005:
+                prediction.current_trend = "declining"
+            else:
+                prediction.current_trend = "stable"
+
+            predicted_85 = _predict_breach_time(data_points, 1, 0.85)
+            predicted_100 = _predict_breach_time(data_points, 1, 1.0)
+            prediction.predicted_breach_85_at = predicted_85
+            prediction.predicted_breach_100_at = predicted_100
+
+            future_hours = min(168, max(24, int(168)))
+            for h in range(1, future_hours + 1):
+                future_x = len(data_points) - 1 + h
+                future_val = intercept + slope * future_x
+                future_val = max(0, min(future_val, 1.5))
+                prediction.prediction_points.append(CapacityHourlyPoint(
+                    hour=datetime.utcnow() + timedelta(hours=h),
+                    overall_utilization=round(future_val * 100, 1),
+                    latency_utilization=0,
+                    connection_utilization=0,
+                    throughput_utilization=0,
+                ))
+
+    current_water_level = snapshots[-1].overall_utilization if snapshots else 0.0
+    if current_water_level < 0.6:
+        status = "green"
+    elif current_water_level < 0.85:
+        status = "yellow"
+    else:
+        status = "red"
+
+    plans = db.query(CapacityPlan).filter(CapacityPlan.target_id == target_id).all()
+    plan_responses = [CapacityPlanResponse(
+        id=p.id,
+        target_id=p.target_id,
+        planned_expansion_at=p.planned_expansion_at,
+        target_capacity_multiplier=p.target_capacity_multiplier,
+        notes=p.notes,
+        created_at=p.created_at,
+        updated_at=p.updated_at,
+    ) for p in plans]
+
+    alerts = db.query(CapacityAlert).filter(
+        CapacityAlert.target_id == target_id,
+        CapacityAlert.is_active == True
+    ).all()
+    alert_responses = [CapacityAlertResponse(
+        id=a.id,
+        target_id=a.target_id,
+        target_name=a.target_name,
+        current_water_level=round(a.current_water_level * 100, 1),
+        predicted_breach_85_at=a.predicted_breach_85_at,
+        predicted_breach_100_at=a.predicted_breach_100_at,
+        suggested_expansion=a.suggested_expansion,
+        is_active=a.is_active,
+        created_at=a.created_at,
+    ) for a in alerts]
+
+    return CapacityDetailResponse(
+        target_id=target_id,
+        target_name=target.name,
+        group_name=target.group.name if target.group else None,
+        config=config and CapacityConfigResponse(
+            id=config.id,
+            target_id=config.target_id,
+            group_id=config.group_id,
+            max_connections=config.max_connections,
+            max_latency_ms=config.max_latency_ms,
+            max_throughput_rps=config.max_throughput_rps,
+            is_override=config.is_override,
+            created_at=config.created_at,
+            updated_at=config.updated_at,
+        ),
+        current_water_level=round(current_water_level * 100, 1),
+        water_level_status=status,
+        trend=trend,
+        heatmap=heatmap_cells,
+        prediction=prediction,
+        plans=plan_responses,
+        alerts=alert_responses,
+    )
+
+
+@app.post("/api/capacity/configs", response_model=CapacityConfigResponse)
+def create_capacity_config(data: CapacityConfigCreate, db: Session = Depends(get_db)):
+    if data.target_id:
+        target = db.query(ProbeTarget).filter(ProbeTarget.id == data.target_id).first()
+        if not target:
+            raise HTTPException(status_code=404, detail="Target not found")
+    if data.group_id:
+        group = db.query(ProbeGroup).filter(ProbeGroup.id == data.group_id).first()
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+
+    existing = None
+    if data.target_id:
+        existing = db.query(CapacityConfig).filter(CapacityConfig.target_id == data.target_id).first()
+    elif data.group_id:
+        existing = db.query(CapacityConfig).filter(CapacityConfig.group_id == data.group_id).first()
+
+    if existing:
+        existing.max_connections = data.max_connections
+        existing.max_latency_ms = data.max_latency_ms
+        existing.max_throughput_rps = data.max_throughput_rps
+        existing.is_override = data.is_override or False
+        existing.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    config = CapacityConfig(
+        target_id=data.target_id,
+        group_id=data.group_id,
+        max_connections=data.max_connections,
+        max_latency_ms=data.max_latency_ms,
+        max_throughput_rps=data.max_throughput_rps,
+        is_override=data.is_override or False,
+    )
+    db.add(config)
+    db.commit()
+    db.refresh(config)
+    return config
+
+
+@app.put("/api/capacity/configs/{config_id}", response_model=CapacityConfigResponse)
+def update_capacity_config(config_id: int, data: CapacityConfigUpdate, db: Session = Depends(get_db)):
+    config = db.query(CapacityConfig).filter(CapacityConfig.id == config_id).first()
+    if not config:
+        raise HTTPException(status_code=404, detail="Capacity config not found")
+    for field, value in data.dict(exclude_unset=True).items():
+        setattr(config, field, value)
+    config.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(config)
+    return config
+
+
+@app.delete("/api/capacity/configs/{config_id}")
+def delete_capacity_config(config_id: int, db: Session = Depends(get_db)):
+    config = db.query(CapacityConfig).filter(CapacityConfig.id == config_id).first()
+    if not config:
+        raise HTTPException(status_code=404, detail="Capacity config not found")
+    db.delete(config)
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/capacity/alerts", response_model=List[CapacityAlertResponse])
+def get_capacity_alerts(active_only: bool = True, db: Session = Depends(get_db)):
+    query = db.query(CapacityAlert)
+    if active_only:
+        query = query.filter(CapacityAlert.is_active == True)
+    alerts = query.order_by(CapacityAlert.created_at.desc()).all()
+    return [CapacityAlertResponse(
+        id=a.id,
+        target_id=a.target_id,
+        target_name=a.target_name,
+        current_water_level=round(a.current_water_level * 100, 1),
+        predicted_breach_85_at=a.predicted_breach_85_at,
+        predicted_breach_100_at=a.predicted_breach_100_at,
+        suggested_expansion=a.suggested_expansion,
+        is_active=a.is_active,
+        created_at=a.created_at,
+    ) for a in alerts]
+
+
+@app.post("/api/capacity/alerts/{alert_id}/resolve")
+def resolve_capacity_alert(alert_id: int, db: Session = Depends(get_db)):
+    alert = db.query(CapacityAlert).filter(CapacityAlert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    alert.is_active = False
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/capacity/plans", response_model=CapacityPlanResponse)
+def create_capacity_plan(data: CapacityPlanCreate, db: Session = Depends(get_db)):
+    target = db.query(ProbeTarget).filter(ProbeTarget.id == data.target_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    existing = db.query(CapacityPlan).filter(CapacityPlan.target_id == data.target_id).first()
+    if existing:
+        existing.planned_expansion_at = data.planned_expansion_at
+        existing.target_capacity_multiplier = data.target_capacity_multiplier
+        existing.notes = data.notes
+        existing.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    plan = CapacityPlan(
+        target_id=data.target_id,
+        planned_expansion_at=data.planned_expansion_at,
+        target_capacity_multiplier=data.target_capacity_multiplier,
+        notes=data.notes,
+    )
+    db.add(plan)
+    db.commit()
+    db.refresh(plan)
+    return plan
+
+
+@app.put("/api/capacity/plans/{plan_id}", response_model=CapacityPlanResponse)
+def update_capacity_plan(plan_id: int, data: CapacityPlanUpdate, db: Session = Depends(get_db)):
+    plan = db.query(CapacityPlan).filter(CapacityPlan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    for field, value in data.dict(exclude_unset=True).items():
+        setattr(plan, field, value)
+    plan.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(plan)
+    return plan
+
+
+@app.delete("/api/capacity/plans/{plan_id}")
+def delete_capacity_plan(plan_id: int, db: Session = Depends(get_db)):
+    plan = db.query(CapacityPlan).filter(CapacityPlan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    db.delete(plan)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/capacity/compute-snapshots")
+def compute_capacity_snapshots(db: Session = Depends(get_db)):
+    targets = db.query(ProbeTarget).all()
+    computed = 0
+    for target in targets:
+        config = _get_effective_capacity_config(db, target.id)
+        if not config:
+            continue
+
+        current_hour = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+        existing = db.query(CapacityHourlySnapshot).filter(
+            CapacityHourlySnapshot.target_id == target.id,
+            CapacityHourlySnapshot.hour == current_hour
+        ).first()
+
+        last_hour = current_hour - timedelta(hours=1)
+        results = db.query(ProbeResult).filter(
+            ProbeResult.target_id == target.id,
+            ProbeResult.checked_at >= last_hour,
+            ProbeResult.checked_at < current_hour
+        ).all()
+
+        if not results:
+            continue
+
+        avg_latency = sum(r.response_time or 0 for r in results) / len(results)
+        success_rate = sum(1 for r in results if r.is_up) / len(results)
+        request_count = len(results)
+
+        utils = _calculate_utilization(avg_latency, success_rate, request_count, config)
+
+        if existing:
+            existing.avg_latency_ms = avg_latency
+            existing.success_rate = success_rate
+            existing.request_count = request_count
+            existing.latency_utilization = utils["latency_utilization"]
+            existing.connection_utilization = utils["connection_utilization"]
+            existing.throughput_utilization = utils["throughput_utilization"]
+            existing.overall_utilization = utils["overall_utilization"]
+        else:
+            snapshot = CapacityHourlySnapshot(
+                target_id=target.id,
+                hour=current_hour,
+                avg_latency_ms=avg_latency,
+                success_rate=success_rate,
+                request_count=request_count,
+                **utils,
+            )
+            db.add(snapshot)
+        computed += 1
+
+    db.commit()
+    _generate_capacity_alerts(db)
+    return {"ok": True, "computed": computed}
+
+
+def _generate_capacity_alerts(db: Session):
+    targets = db.query(ProbeTarget).all()
+    for target in targets:
+        config = _get_effective_capacity_config(db, target.id)
+        if not config:
+            continue
+
+        snapshots = db.query(CapacityHourlySnapshot).filter(
+            CapacityHourlySnapshot.target_id == target.id,
+            CapacityHourlySnapshot.hour >= datetime.utcnow() - timedelta(days=7)
+        ).order_by(CapacityHourlySnapshot.hour.asc()).all()
+
+        if len(snapshots) < 2:
+            continue
+
+        current_level = snapshots[-1].overall_utilization
+        data_points = [(i, s.overall_utilization) for i, s in enumerate(snapshots)]
+
+        predicted_85 = _predict_breach_time(data_points, 1, 0.85)
+        predicted_100 = _predict_breach_time(data_points, 1, 1.0)
+
+        should_alert = False
+        if predicted_85 and predicted_85 <= datetime.utcnow() + timedelta(days=7):
+            should_alert = True
+        if current_level >= 0.85:
+            should_alert = True
+
+        if not should_alert:
+            existing_alert = db.query(CapacityAlert).filter(
+                CapacityAlert.target_id == target.id,
+                CapacityAlert.is_active == True
+            ).first()
+            if existing_alert:
+                existing_alert.is_active = False
+            continue
+
+        suggested = 1.5
+        if current_level > 0:
+            suggested = round(current_level / 0.5, 1)
+
+        existing_alert = db.query(CapacityAlert).filter(
+            CapacityAlert.target_id == target.id,
+            CapacityAlert.is_active == True
+        ).first()
+
+        if existing_alert:
+            existing_alert.current_water_level = current_level
+            existing_alert.predicted_breach_85_at = predicted_85
+            existing_alert.predicted_breach_100_at = predicted_100
+            existing_alert.suggested_expansion = suggested
+        else:
+            alert = CapacityAlert(
+                target_id=target.id,
+                target_name=target.name,
+                current_water_level=current_level,
+                predicted_breach_85_at=predicted_85,
+                predicted_breach_100_at=predicted_100,
+                suggested_expansion=suggested,
+                is_active=True,
+            )
+            db.add(alert)
+
+    db.commit()
+
+
+@app.post("/api/capacity/group-configs/{group_id}")
+def apply_group_capacity_config(group_id: int, data: CapacityConfigCreate, db: Session = Depends(get_db)):
+    group = db.query(ProbeGroup).filter(ProbeGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    group_config = db.query(CapacityConfig).filter(CapacityConfig.group_id == group_id).first()
+    if not group_config:
+        group_config = CapacityConfig(
+            group_id=group_id,
+            max_connections=data.max_connections,
+            max_latency_ms=data.max_latency_ms,
+            max_throughput_rps=data.max_throughput_rps,
+        )
+        db.add(group_config)
+    else:
+        group_config.max_connections = data.max_connections
+        group_config.max_latency_ms = data.max_latency_ms
+        group_config.max_throughput_rps = data.max_throughput_rps
+        group_config.updated_at = datetime.utcnow()
+
+    targets = db.query(ProbeTarget).filter(ProbeTarget.group_id == group_id).all()
+    for target in targets:
+        existing = db.query(CapacityConfig).filter(CapacityConfig.target_id == target.id).first()
+        if existing and not existing.is_override:
+            db.delete(existing)
+
+    db.commit()
+    db.refresh(group_config)
+    return {"ok": True, "group_config_id": group_config.id}
+
+
+def _init_demo_capacity():
+    db = next(get_db())
+    try:
+        existing_configs = db.query(CapacityConfig).first()
+        if existing_configs:
+            return
+
+        targets = db.query(ProbeTarget).all()
+        if len(targets) < 3:
+            return
+
+        groups = db.query(ProbeGroup).all()
+
+        safe_target = targets[0]
+        warning_target = targets[1] if len(targets) > 1 else targets[0]
+        critical_target = targets[2] if len(targets) > 2 else targets[0]
+
+        if groups:
+            group_config = CapacityConfig(
+                group_id=groups[0].id,
+                max_connections=1000,
+                max_latency_ms=500.0,
+                max_throughput_rps=100.0,
+            )
+            db.add(group_config)
+
+        safe_config = CapacityConfig(
+            target_id=safe_target.id,
+            max_connections=5000,
+            max_latency_ms=1000.0,
+            max_throughput_rps=500.0,
+            is_override=True,
+        )
+        db.add(safe_config)
+
+        warning_config = CapacityConfig(
+            target_id=warning_target.id,
+            max_connections=1000,
+            max_latency_ms=300.0,
+            max_throughput_rps=100.0,
+            is_override=True,
+        )
+        db.add(warning_config)
+
+        critical_config = CapacityConfig(
+            target_id=critical_target.id,
+            max_connections=500,
+            max_latency_ms=200.0,
+            max_throughput_rps=50.0,
+            is_override=True,
+        )
+        db.add(critical_config)
+        db.commit()
+
+        now = datetime.utcnow()
+        for hour_offset in range(168, 0, -1):
+            hour = (now - timedelta(hours=hour_offset)).replace(minute=0, second=0, microsecond=0)
+
+            safe_base = 0.25 + 0.05 * (168 - hour_offset) / 168.0
+            safe_val = max(0.05, min(safe_base + (hash(f"safe_{hour_offset}") % 100 - 50) / 1000.0, 0.55))
+            db.add(CapacityHourlySnapshot(
+                target_id=safe_target.id,
+                hour=hour,
+                avg_latency_ms=safe_val * 1000.0,
+                success_rate=0.99,
+                request_count=int(safe_val * 5000),
+                latency_utilization=safe_val,
+                connection_utilization=safe_val * 0.8,
+                throughput_utilization=safe_val * 0.6,
+                overall_utilization=safe_val,
+            ))
+
+            warning_base = 0.45 + 0.35 * (168 - hour_offset) / 168.0
+            warning_val = max(0.3, min(warning_base + (hash(f"warn_{hour_offset}") % 100 - 50) / 800.0, 0.84))
+            db.add(CapacityHourlySnapshot(
+                target_id=warning_target.id,
+                hour=hour,
+                avg_latency_ms=warning_val * 300.0,
+                success_rate=0.97,
+                request_count=int(warning_val * 1000),
+                latency_utilization=warning_val,
+                connection_utilization=warning_val * 0.9,
+                throughput_utilization=warning_val * 0.85,
+                overall_utilization=warning_val,
+            ))
+
+            critical_base = 0.6 + 0.35 * (168 - hour_offset) / 168.0
+            critical_val = max(0.5, min(critical_base + (hash(f"crit_{hour_offset}") % 100 - 50) / 600.0, 0.98))
+            db.add(CapacityHourlySnapshot(
+                target_id=critical_target.id,
+                hour=hour,
+                avg_latency_ms=critical_val * 200.0,
+                success_rate=0.92,
+                request_count=int(critical_val * 500),
+                latency_utilization=critical_val,
+                connection_utilization=critical_val * 0.95,
+                throughput_utilization=critical_val * 0.9,
+                overall_utilization=critical_val,
+            ))
+
+        db.commit()
+
+        _generate_capacity_alerts(db)
+
+        plan = CapacityPlan(
+            target_id=critical_target.id,
+            planned_expansion_at=now + timedelta(days=3),
+            target_capacity_multiplier=2.0,
+            notes="扩容至双倍容量以应对增长趋势",
+        )
+        db.add(plan)
+        db.commit()
+
+        print(f"Demo capacity data initialized: safe={safe_target.name}, warning={warning_target.name}, critical={critical_target.name}")
+    except Exception as e:
+        print(f"Error initializing demo capacity data: {e}")
+        db.rollback()
+    finally:
+        db.close()
 

@@ -687,6 +687,71 @@ class DutySwap(Base):
     schedule = relationship("DutySchedule", back_populates="swaps")
 
 
+class CapacityConfig(Base):
+    __tablename__ = "capacity_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=True, index=True)
+    group_id = Column(Integer, ForeignKey("probe_groups.id"), nullable=True, index=True)
+    max_connections = Column(Integer, nullable=True)
+    max_latency_ms = Column(Float, nullable=False, default=500.0)
+    max_throughput_rps = Column(Float, nullable=True)
+    is_override = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    target = relationship("ProbeTarget", backref="capacity_config")
+    group = relationship("ProbeGroup", backref="capacity_config")
+
+
+class CapacityHourlySnapshot(Base):
+    __tablename__ = "capacity_hourly_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False, index=True)
+    hour = Column(DateTime, nullable=False, index=True)
+    avg_latency_ms = Column(Float, nullable=False, default=0)
+    success_rate = Column(Float, nullable=False, default=1.0)
+    request_count = Column(Integer, nullable=False, default=0)
+    latency_utilization = Column(Float, nullable=False, default=0)
+    connection_utilization = Column(Float, nullable=False, default=0)
+    throughput_utilization = Column(Float, nullable=False, default=0)
+    overall_utilization = Column(Float, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    target = relationship("ProbeTarget", backref="capacity_snapshots")
+
+
+class CapacityAlert(Base):
+    __tablename__ = "capacity_alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False, index=True)
+    target_name = Column(String(255), nullable=False)
+    current_water_level = Column(Float, nullable=False)
+    predicted_breach_85_at = Column(DateTime, nullable=True)
+    predicted_breach_100_at = Column(DateTime, nullable=True)
+    suggested_expansion = Column(Float, nullable=True)
+    is_active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    target = relationship("ProbeTarget", backref="capacity_alerts")
+
+
+class CapacityPlan(Base):
+    __tablename__ = "capacity_plans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False, index=True)
+    planned_expansion_at = Column(DateTime, nullable=False)
+    target_capacity_multiplier = Column(Float, nullable=False, default=2.0)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    target = relationship("ProbeTarget", backref="capacity_plan")
+
+
 class DispatchedAlert(Base):
     __tablename__ = "dispatched_alerts"
 

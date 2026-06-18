@@ -18,6 +18,7 @@ import RecordingControlPanel from './components/RecordingControlPanel';
 import PlaybackControlPanel from './components/PlaybackControlPanel';
 import MaintenanceCalendar from './components/MaintenanceCalendar';
 import DutyDispatchCenter from './components/DutyDispatchCenter';
+import CapacityMonitor from './components/CapacityMonitor';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
@@ -281,6 +282,12 @@ function App() {
             📟 值班调度
           </button>
           <button
+            className={`tab-btn ${activeTab === 'capacity' ? 'active' : ''}`}
+            onClick={() => setActiveTab('capacity')}
+          >
+            📊 容量水位
+          </button>
+          <button
             className={`tab-btn ${activeTab === 'replay' ? 'active' : ''}`}
             onClick={() => setActiveTab('replay')}
           >
@@ -394,6 +401,8 @@ function App() {
             />
           ) : activeTab === 'duty' ? (
             <DutyDispatchCenter />
+          ) : activeTab === 'capacity' ? (
+            <CapacityMonitor />
           ) : activeTab === 'replay' ? (
             <div className="replay-page">
               <div className="replay-panels">
@@ -440,7 +449,7 @@ function App() {
           )}
         </div>
 
-        {activeTab !== 'slo' && activeTab !== 'command' && activeTab !== 'noise' && activeTab !== 'discovery' && activeTab !== 'replay' && activeTab !== 'duty' ? (
+        {activeTab !== 'slo' && activeTab !== 'command' && activeTab !== 'noise' && activeTab !== 'discovery' && activeTab !== 'replay' && activeTab !== 'duty' && activeTab !== 'capacity' ? (
           <div className="right-panel">
             <AlertPanel
               alerts={alerts}
