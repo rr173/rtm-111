@@ -1540,3 +1540,106 @@ class CapacityDetailResponse(BaseModel):
     baseline_band: List[CapacityBaselineBandPoint] = []
     deviation_analysis: Optional[CapacityDeviationAnalysis] = None
     effective_deviation_threshold: float = 30.0
+
+
+class AuditLogResponse(BaseModel):
+    id: int
+    operator: Optional[str] = None
+    operation_type: str
+    target_type: str
+    target_id: Optional[int] = None
+    target_name: Optional[str] = None
+    old_value: Optional[Dict[str, Any]] = None
+    new_value: Optional[Dict[str, Any]] = None
+    description: Optional[str] = None
+    ip_address: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AuditLogListResponse(BaseModel):
+    items: List[AuditLogResponse] = []
+    total: int = 0
+    page: int = 1
+    page_size: int = 20
+    total_pages: int = 0
+
+
+class ComplianceReportSummary(BaseModel):
+    total_targets: int = 0
+    total_alerts: int = 0
+    total_audit_logs: int = 0
+    total_config_changes: int = 0
+
+
+class ProbeCoverageDetail(BaseModel):
+    total_targets: int = 0
+    fully_covered: int = 0
+    partially_covered: int = 0
+    not_covered: int = 0
+    coverage_rate: float = 0.0
+    uncovered_targets: List[Dict[str, Any]] = []
+
+
+class AlertResponseDetail(BaseModel):
+    total_alerts: int = 0
+    acknowledged_alerts: int = 0
+    unacknowledged_alerts: int = 0
+    acknowledgment_rate: float = 0.0
+    avg_response_seconds: Optional[float] = None
+
+
+class MttrDetail(BaseModel):
+    total_incidents: int = 0
+    avg_recovery_seconds: Optional[float] = None
+    median_recovery_seconds: Optional[float] = None
+    max_recovery_seconds: Optional[float] = None
+    min_recovery_seconds: Optional[float] = None
+
+
+class ConfigChangesDetail(BaseModel):
+    total_changes: int = 0
+    target_changes: int = 0
+    group_changes: int = 0
+    threshold_changes: int = 0
+    maintenance_changes: int = 0
+    duty_changes: int = 0
+
+
+class TopChangedTarget(BaseModel):
+    target_id: int
+    target_name: str
+    change_count: int
+
+
+class ComplianceReportResponse(BaseModel):
+    id: int
+    report_type: str
+    period_start: datetime
+    period_end: datetime
+    title: str
+    summary: ComplianceReportSummary
+    probe_coverage: ProbeCoverageDetail
+    alert_response: AlertResponseDetail
+    mttr: MttrDetail
+    config_changes: ConfigChangesDetail
+    top_changed_targets: List[TopChangedTarget] = []
+    audit_log_count: int = 0
+    generated_at: datetime
+    generated_by: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ComplianceReportListResponse(BaseModel):
+    items: List[ComplianceReportResponse] = []
+    total: int = 0
+
+
+class GenerateReportRequest(BaseModel):
+    start_time: datetime
+    end_time: datetime
+    report_type: Optional[str] = "custom"

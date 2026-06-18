@@ -817,3 +817,42 @@ class DispatchedAlert(Base):
     alert = relationship("Alert", backref="dispatch")
     schedule = relationship("DutySchedule", back_populates="dispatched_alerts")
     group = relationship("ProbeGroup", backref="dispatched_alerts")
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    operator = Column(String(100), nullable=True, index=True)
+    operation_type = Column(String(50), nullable=False, index=True)
+    target_type = Column(String(50), nullable=False, index=True)
+    target_id = Column(Integer, nullable=True, index=True)
+    target_name = Column(String(255), nullable=True, index=True)
+    old_value = Column(JSON, nullable=True)
+    new_value = Column(JSON, nullable=True)
+    description = Column(String(512), nullable=True)
+    ip_address = Column(String(50), nullable=True)
+    user_agent = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class ComplianceReport(Base):
+    __tablename__ = "compliance_reports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    report_type = Column(String(20), nullable=False, index=True)
+    period_start = Column(DateTime, nullable=False, index=True)
+    period_end = Column(DateTime, nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    summary = Column(JSON, nullable=False)
+    probe_coverage = Column(JSON, nullable=False)
+    alert_response = Column(JSON, nullable=False)
+    mttr = Column(JSON, nullable=False)
+    config_changes = Column(JSON, nullable=False)
+    top_changed_targets = Column(JSON, nullable=False)
+    audit_log_count = Column(Integer, default=0)
+    generated_at = Column(DateTime, default=datetime.utcnow, index=True)
+    generated_by = Column(String(100), nullable=True)
+
+    class Config:
+        from_attributes = True

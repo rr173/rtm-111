@@ -19,6 +19,8 @@ import PlaybackControlPanel from './components/PlaybackControlPanel';
 import MaintenanceCalendar from './components/MaintenanceCalendar';
 import DutyDispatchCenter from './components/DutyDispatchCenter';
 import CapacityMonitor from './components/CapacityMonitor';
+import AuditLogPage from './components/AuditLogPage';
+import ComplianceReportPage from './components/ComplianceReportPage';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
@@ -294,6 +296,18 @@ function App() {
             🎬 录制回放
           </button>
           <button
+            className={`tab-btn ${activeTab === 'audit' ? 'active' : ''}`}
+            onClick={() => setActiveTab('audit')}
+          >
+            📋 审计日志
+          </button>
+          <button
+            className={`tab-btn ${activeTab === 'compliance' ? 'active' : ''}`}
+            onClick={() => setActiveTab('compliance')}
+          >
+            📊 合规报告
+          </button>
+          <button
             className={`tab-btn`}
             onClick={() => setShowRuleEditor(true)}
           >
@@ -403,6 +417,10 @@ function App() {
             <DutyDispatchCenter />
           ) : activeTab === 'capacity' ? (
             <CapacityMonitor />
+          ) : activeTab === 'audit' ? (
+            <AuditLogPage />
+          ) : activeTab === 'compliance' ? (
+            <ComplianceReportPage />
           ) : activeTab === 'replay' ? (
             <div className="replay-page">
               <div className="replay-panels">
@@ -449,7 +467,7 @@ function App() {
           )}
         </div>
 
-        {activeTab !== 'slo' && activeTab !== 'command' && activeTab !== 'noise' && activeTab !== 'discovery' && activeTab !== 'replay' && activeTab !== 'duty' && activeTab !== 'capacity' ? (
+        {activeTab !== 'slo' && activeTab !== 'command' && activeTab !== 'noise' && activeTab !== 'discovery' && activeTab !== 'replay' && activeTab !== 'duty' && activeTab !== 'capacity' && activeTab !== 'audit' && activeTab !== 'compliance' ? (
           <div className="right-panel">
             <AlertPanel
               alerts={alerts}

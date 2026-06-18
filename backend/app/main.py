@@ -1,9 +1,11 @@
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Set, Optional, Dict, Any
 from datetime import datetime, timedelta
 from collections import deque
+import json
 
 from .database import engine, get_db, Base
 from .models import (
@@ -20,6 +22,7 @@ from .models import (
     DutySchedule, DutySlot, DutySwap, DispatchedAlert,
     CapacityConfig, CapacityHourlySnapshot, CapacityAlert, CapacityPlan,
     CapacityBaseline, CapacityDeviationAlert,
+    AuditLog, ComplianceReport,
 )
 from .schemas import (
     ProbeTargetCreate, ProbeTargetUpdate, ProbeTargetResponse,
@@ -64,6 +67,9 @@ from .schemas import (
     CapacityAlertResponse, CapacityDetailResponse,
     CapacityBaselineBandPoint, CapacityDeviationEvent,
     CapacityDeviationAlertResponse, CapacityDeviationAnalysis,
+    AuditLogResponse, AuditLogListResponse,
+    ComplianceReportResponse, ComplianceReportListResponse,
+    GenerateReportRequest,
 )
 from .observer_engine import observer_engine
 from .probe_engine import probe_engine
@@ -73,6 +79,8 @@ from .recording_engine import recording_engine
 from .playback_engine import playback_engine
 from .maintenance_engine import maintenance_engine
 from .duty_engine import duty_engine
+from .audit_engine import audit_engine
+from .compliance_engine import compliance_engine
 from pydantic import BaseModel
 from typing import List as TypingList
 
@@ -1139,9 +1147,93 @@ def _migrate_capacity_tables():
             print(f"Capacity migration error: {e}")
 
 
+def _migrate_audit_tables():
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        try:
+            audit_tables = {
+                "audit_logs": """
+                    CREATE TABLE audit_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        operator VARCHAR(100),
+                        operation_type VARCHAR(50) NOT NULL,
+                        target_type VARCHAR(50) NOT NULL,
+                        target_id INTEGER,
+                        target_name VARCHAR(255),
+                        old_value TEXT,
+                        new_value TEXT,
+                        description VARCHAR(512),
+                        ip_address VARCHAR(50),
+                        user_agent VARCHAR(255),
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """,
+                "compliance_reports": """
+                    CREATE TABLE compliance_reports (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        report_type VARCHAR(20) NOT NULL,
+                        period_start DATETIME NOT NULL,
+                        period_end DATETIME NOT NULL,
+                        title VARCHAR(255) NOT NULL,
+                        summary TEXT NOT NULL,
+                        probe_coverage TEXT NOT NULL,
+                        alert_response TEXT NOT NULL,
+                        mttr TEXT NOT NULL,
+                        config_changes TEXT NOT NULL,
+                        top_changed_targets TEXT NOT NULL,
+                        audit_log_count INTEGER DEFAULT 0,
+                        generated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        generated_by VARCHAR(100)
+                    )
+                """,
+            }
+
+            for table_name, create_sql in audit_tables.items():
+                result = conn.execute(text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"))
+                if not result.fetchone():
+                    conn.execute(text(create_sql))
+                    index_sqls = {
+                        "audit_logs": [
+                            "CREATE INDEX idx_audit_operator ON audit_logs(operator)",
+                            "CREATE INDEX idx_audit_operation_type ON audit_logs(operation_type)",
+                            "CREATE INDEX idx_audit_target_type ON audit_logs(target_type)",
+                            "CREATE INDEX idx_audit_target_id ON audit_logs(target_id)",
+                            "CREATE INDEX idx_audit_target_name ON audit_logs(target_name)",
+                            "CREATE INDEX idx_audit_created_at ON audit_logs(created_at)",
+                        ],
+                        "compliance_reports": [
+                            "CREATE INDEX idx_compliance_report_type ON compliance_reports(report_type)",
+                            "CREATE INDEX idx_compliance_period_start ON compliance_reports(period_start)",
+                            "CREATE INDEX idx_compliance_period_end ON compliance_reports(period_end)",
+                            "CREATE INDEX idx_compliance_generated_at ON compliance_reports(generated_at)",
+                        ],
+                    }
+                    if table_name in index_sqls:
+                        for idx_sql in index_sqls[table_name]:
+                            conn.execute(text(idx_sql))
+                    print(f"Created table {table_name}")
+
+            conn.commit()
+        except Exception as e:
+            print(f"Audit migration error: {e}")
+
+
+def _get_operator_from_request(request: Request = None) -> Optional[str]:
+    if request is None:
+        return None
+    return request.headers.get("X-User") or request.headers.get("x-user")
+
+
+def _get_client_ip(request: Request = None) -> Optional[str]:
+    if request is None:
+        return None
+    return request.client.host if request.client else None
+
+
 _create_tables()
 _migrate_database()
 _migrate_capacity_tables()
+_migrate_audit_tables()
 
 app = FastAPI(title="Probe Dashboard API")
 
@@ -1255,6 +1347,8 @@ async def startup_event():
     _init_demo_incidents()
     _init_demo_duty()
     _init_demo_capacity()
+    _init_demo_audit()
+    _init_demo_compliance_reports()
     incident_engine.attach_callbacks()
     maintenance_engine.register_status_callback(lambda data: manager.broadcast_maintenance_update())
     await observer_engine.start()
@@ -3069,7 +3163,7 @@ def list_targets(db: Session = Depends(get_db)):
 
 
 @app.post("/api/targets", response_model=ProbeTargetResponse)
-def create_target(target: ProbeTargetCreate, db: Session = Depends(get_db)):
+def create_target(target: ProbeTargetCreate, request: Request, db: Session = Depends(get_db)):
     db_target = ProbeTarget(**target.model_dump())
     db.add(db_target)
     db.commit()
@@ -3079,6 +3173,21 @@ def create_target(target: ProbeTargetCreate, db: Session = Depends(get_db)):
         joinedload(ProbeTarget.group),
         joinedload(ProbeTarget.rule),
     ).filter(ProbeTarget.id == db_target.id).first()
+
+    operator = _get_operator_from_request(request)
+    ip_address = _get_client_ip(request)
+    audit_engine.log_operation(
+        db=db,
+        operator=operator,
+        operation_type="target_create",
+        target_type="target",
+        target_id=db_target.id,
+        target_name=db_target.name,
+        new_value=target.model_dump(),
+        description=f"创建探测目标: {db_target.name}",
+        ip_address=ip_address,
+    )
+
     return _enrich_target(db_target, db)
 
 
@@ -3094,7 +3203,7 @@ def get_target(target_id: int, db: Session = Depends(get_db)):
 
 
 @app.put("/api/targets/{target_id}", response_model=ProbeTargetResponse)
-def update_target(target_id: int, target_update: ProbeTargetUpdate, db: Session = Depends(get_db)):
+def update_target(target_id: int, target_update: ProbeTargetUpdate, request: Request, db: Session = Depends(get_db)):
     target = db.query(ProbeTarget).options(
         joinedload(ProbeTarget.group),
         joinedload(ProbeTarget.rule),
@@ -3102,6 +3211,7 @@ def update_target(target_id: int, target_update: ProbeTargetUpdate, db: Session 
     if not target:
         raise HTTPException(status_code=404, detail="Target not found")
 
+    old_target_data = {c.name: getattr(target, c.name) for c in target.__table__.columns}
     old_paused = target.paused
 
     update_data = target_update.model_dump(exclude_unset=True)
@@ -3114,23 +3224,58 @@ def update_target(target_id: int, target_update: ProbeTargetUpdate, db: Session 
     if "paused" in update_data and old_paused != target.paused:
         probe_engine.toggle_target(target.id, target.paused)
 
+    operator = _get_operator_from_request(request)
+    ip_address = _get_client_ip(request)
+    has_threshold_change = any(k in update_data for k in ['degrade_threshold', 'down_threshold', 'success_threshold'])
+    op_type = "target_threshold_update" if has_threshold_change else "target_update"
+    audit_engine.log_operation(
+        db=db,
+        operator=operator,
+        operation_type=op_type,
+        target_type="target",
+        target_id=target.id,
+        target_name=target.name,
+        old_value=old_target_data,
+        new_value=update_data,
+        description=f"更新探测目标: {target.name}",
+        ip_address=ip_address,
+    )
+
     return _enrich_target(target, db)
 
 
 @app.delete("/api/targets/{target_id}")
-def delete_target(target_id: int, db: Session = Depends(get_db)):
+def delete_target(target_id: int, request: Request, db: Session = Depends(get_db)):
     target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="Target not found")
 
+    old_target_data = {c.name: getattr(target, c.name) for c in target.__table__.columns}
+    target_name = target.name
+
     probe_engine.remove_target(target_id)
     db.delete(target)
     db.commit()
+
+    operator = _get_operator_from_request(request)
+    ip_address = _get_client_ip(request)
+    audit_engine.log_operation(
+        db=db,
+        operator=operator,
+        operation_type="target_delete",
+        target_type="target",
+        target_id=target_id,
+        target_name=target_name,
+        old_value=old_target_data,
+        description=f"删除探测目标: {target_name}",
+        ip_address=ip_address,
+    )
+
     return {"message": "Target deleted"}
 
 
 @app.post("/api/targets/{target_id}/pause")
-def pause_target(target_id: int, db: Session = Depends(get_db)):
+def pause_target(target_id: int, request: Request, db: Session = Depends(get_db)):
     target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="Target not found")
@@ -3138,11 +3283,27 @@ def pause_target(target_id: int, db: Session = Depends(get_db)):
     target.paused = True
     db.commit()
     probe_engine.toggle_target(target_id, True)
+
+    operator = _get_operator_from_request(request)
+    ip_address = _get_client_ip(request)
+    audit_engine.log_operation(
+        db=db,
+        operator=operator,
+        operation_type="target_pause",
+        target_type="target",
+        target_id=target_id,
+        target_name=target.name,
+        old_value={"paused": False},
+        new_value={"paused": True},
+        description=f"暂停探测目标: {target.name}",
+        ip_address=ip_address,
+    )
+
     return {"message": "Target paused"}
 
 
 @app.post("/api/targets/{target_id}/resume")
-def resume_target(target_id: int, db: Session = Depends(get_db)):
+def resume_target(target_id: int, request: Request, db: Session = Depends(get_db)):
     target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="Target not found")
@@ -3150,28 +3311,76 @@ def resume_target(target_id: int, db: Session = Depends(get_db)):
     target.paused = False
     db.commit()
     probe_engine.toggle_target(target_id, False)
+
+    operator = _get_operator_from_request(request)
+    ip_address = _get_client_ip(request)
+    audit_engine.log_operation(
+        db=db,
+        operator=operator,
+        operation_type="target_resume",
+        target_type="target",
+        target_id=target_id,
+        target_name=target.name,
+        old_value={"paused": True},
+        new_value={"paused": False},
+        description=f"恢复探测目标: {target.name}",
+        ip_address=ip_address,
+    )
+
     return {"message": "Target resumed"}
 
 
 @app.post("/api/targets/{target_id}/silence")
-def silence_target(target_id: int, db: Session = Depends(get_db)):
+def silence_target(target_id: int, request: Request, db: Session = Depends(get_db)):
     target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="Target not found")
 
     target.silenced = True
     db.commit()
+
+    operator = _get_operator_from_request(request)
+    ip_address = _get_client_ip(request)
+    audit_engine.log_operation(
+        db=db,
+        operator=operator,
+        operation_type="target_silence",
+        target_type="target",
+        target_id=target_id,
+        target_name=target.name,
+        old_value={"silenced": False},
+        new_value={"silenced": True},
+        description=f"消声探测目标: {target.name}",
+        ip_address=ip_address,
+    )
+
     return {"message": "Target silenced"}
 
 
 @app.post("/api/targets/{target_id}/unsilence")
-def unsilence_target(target_id: int, db: Session = Depends(get_db)):
+def unsilence_target(target_id: int, request: Request, db: Session = Depends(get_db)):
     target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="Target not found")
 
     target.silenced = False
     db.commit()
+
+    operator = _get_operator_from_request(request)
+    ip_address = _get_client_ip(request)
+    audit_engine.log_operation(
+        db=db,
+        operator=operator,
+        operation_type="target_unsilence",
+        target_type="target",
+        target_id=target_id,
+        target_name=target.name,
+        old_value={"silenced": True},
+        new_value={"silenced": False},
+        description=f"取消消声探测目标: {target.name}",
+        ip_address=ip_address,
+    )
+
     return {"message": "Target unsilenced"}
 
 
@@ -3213,10 +3422,13 @@ def list_alerts(limit: int = 50, db: Session = Depends(get_db)):
 
 
 @app.put("/api/alerts/{alert_id}/acknowledge")
-def acknowledge_alert(alert_id: int, ack: AlertAcknowledge, db: Session = Depends(get_db)):
+def acknowledge_alert(alert_id: int, ack: AlertAcknowledge, request: Request, db: Session = Depends(get_db)):
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
+
+    old_acknowledged = alert.acknowledged
+    old_acknowledged_at = alert.acknowledged_at
 
     alert.acknowledged = ack.acknowledged
     if ack.acknowledged:
@@ -3225,6 +3437,23 @@ def acknowledge_alert(alert_id: int, ack: AlertAcknowledge, db: Session = Depend
         alert.acknowledged_at = None
 
     db.commit()
+
+    operator = _get_operator_from_request(request)
+    ip_address = _get_client_ip(request)
+    target_name = alert.target.name if alert.target else None
+    audit_engine.log_operation(
+        db=db,
+        operator=operator,
+        operation_type="alert_acknowledge",
+        target_type="alert",
+        target_id=alert_id,
+        target_name=target_name,
+        old_value={"acknowledged": old_acknowledged, "acknowledged_at": old_acknowledged_at.isoformat() if old_acknowledged_at else None},
+        new_value={"acknowledged": ack.acknowledged, "acknowledged_at": alert.acknowledged_at.isoformat() if alert.acknowledged_at else None},
+        description=f"{'确认' if ack.acknowledged else '取消确认'}告警: {target_name or f'Alert #{alert_id}'}",
+        ip_address=ip_address,
+    )
+
     return {"message": "Alert updated"}
 
 
@@ -8098,4 +8327,362 @@ def _init_demo_capacity():
         db.rollback()
     finally:
         db.close()
+
+
+def _init_demo_audit():
+    db = next(get_db())
+    try:
+        existing_logs = db.query(AuditLog).first()
+        if existing_logs:
+            return
+
+        targets = db.query(ProbeTarget).all()
+        groups = db.query(ProbeGroup).all()
+        if not targets:
+            return
+
+        operators = ["admin", "ops_zhang", "dev_li", "ops_wang", "dev_chen"]
+        target_ops = [
+            "target_create", "target_update", "target_delete",
+            "target_pause", "target_resume",
+            "target_silence", "target_unsilence",
+            "target_threshold_update",
+        ]
+        group_ops = [
+            "group_create", "group_update", "group_delete",
+            "group_pause", "group_resume",
+            "group_silence", "group_unsilence",
+            "group_threshold_apply",
+        ]
+        other_ops = [
+            "alert_acknowledge",
+            "maintenance_create", "maintenance_update", "maintenance_delete",
+            "maintenance_extend", "maintenance_cancel",
+            "duty_swap_create",
+        ]
+
+        now = datetime.utcnow()
+        log_entries = []
+
+        for day_offset in range(30, 0, -1):
+            day_time = now - timedelta(days=day_offset)
+            num_logs = 3 + abs(hash(f"logs_{day_offset}")) % 8
+
+            for i in range(num_logs):
+                log_time = day_time + timedelta(
+                    hours=abs(hash(f"hour_{day_offset}_{i}")) % 24,
+                    minutes=abs(hash(f"min_{day_offset}_{i}")) % 60,
+                    seconds=abs(hash(f"sec_{day_offset}_{i}")) % 60,
+                )
+
+                op_type_idx = abs(hash(f"op_{day_offset}_{i}")) % (len(target_ops) + len(group_ops) + len(other_ops))
+
+                if op_type_idx < len(target_ops):
+                    op_type = target_ops[op_type_idx]
+                    target = targets[abs(hash(f"tgt_{day_offset}_{i}")) % len(targets)]
+                    target_type = "target"
+                    target_id = target.id
+                    target_name = target.name
+                elif op_type_idx < len(target_ops) + len(group_ops):
+                    op_type = group_ops[op_type_idx - len(target_ops)]
+                    group = groups[abs(hash(f"grp_{day_offset}_{i}")) % len(groups)] if groups else targets[0]
+                    target_type = "group"
+                    target_id = group.id if hasattr(group, 'id') else None
+                    target_name = group.name if hasattr(group, 'name') else None
+                else:
+                    op_type = other_ops[op_type_idx - len(target_ops) - len(group_ops)]
+                    target = targets[abs(hash(f"tgt2_{day_offset}_{i}")) % len(targets)]
+                    if "maintenance" in op_type:
+                        target_type = "maintenance"
+                    elif "duty" in op_type:
+                        target_type = "duty"
+                    else:
+                        target_type = "alert"
+                    target_id = target.id
+                    target_name = target.name
+
+                operator = operators[abs(hash(f"optr_{day_offset}_{i}")) % len(operators)]
+
+                has_old = abs(hash(f"old_{day_offset}_{i}")) % 2 == 1
+                has_new = abs(hash(f"new_{day_offset}_{i}")) % 2 == 1
+
+                old_value = None
+                new_value = None
+
+                if has_old:
+                    old_value = {
+                        "interval": 30 + abs(hash(f"oldint_{day_offset}_{i}")) % 30,
+                        "timeout": 5 + abs(hash(f"oldto_{day_offset}_{i}")) % 5,
+                    }
+                if has_new:
+                    new_value = {
+                        "interval": 30 + abs(hash(f"newint_{day_offset}_{i}")) % 30,
+                        "timeout": 5 + abs(hash(f"newto_{day_offset}_{i}")) % 5,
+                    }
+
+                log_entries.append(AuditLog(
+                    operator=operator,
+                    operation_type=op_type,
+                    target_type=target_type,
+                    target_id=target_id,
+                    target_name=target_name,
+                    old_value=old_value,
+                    new_value=new_value,
+                    description=f"执行操作: {audit_engine.get_operation_types().get(op_type, op_type)}",
+                    ip_address=f"192.168.{abs(hash(f'ip1_{day_offset}_{i}')) % 255}.{abs(hash(f'ip2_{day_offset}_{i}')) % 255}",
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+                    created_at=log_time,
+                ))
+
+        for log in log_entries:
+            db.add(log)
+
+        db.commit()
+        print(f"Demo audit data initialized: {len(log_entries)} audit logs")
+    except Exception as e:
+        print(f"Error initializing demo audit data: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _init_demo_compliance_reports():
+    db = next(get_db())
+    try:
+        existing_reports = db.query(ComplianceReport).first()
+        if existing_reports:
+            return
+
+        targets = db.query(ProbeTarget).all()
+        if not targets:
+            return
+
+        now = datetime.utcnow()
+
+        start_of_last_week = now - timedelta(days=now.weekday() + 7)
+        start_of_last_week = start_of_last_week.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_of_last_week = start_of_last_week + timedelta(days=7) - timedelta(microseconds=1)
+
+        target_list = []
+        for i, target in enumerate(targets[:5]):
+            target_list.append({
+                "target_id": target.id,
+                "target_name": target.name,
+                "change_count": 10 - i * 2,
+            })
+
+        summary = {
+            "total_targets": len(targets),
+            "total_alerts": 47,
+            "total_audit_logs": 156,
+            "total_config_changes": 89,
+        }
+
+        probe_coverage = {
+            "total_targets": len(targets),
+            "fully_covered": len(targets) - 2,
+            "partially_covered": 1,
+            "not_covered": 1,
+            "coverage_rate": 92.31,
+            "uncovered_targets": [
+                {"id": targets[-1].id, "name": targets[-1].name, "type": targets[-1].type, "paused": True}
+            ] if len(targets) > 0 else [],
+        }
+
+        alert_response = {
+            "total_alerts": 47,
+            "acknowledged_alerts": 42,
+            "unacknowledged_alerts": 5,
+            "acknowledgment_rate": 89.36,
+            "avg_response_seconds": 325.5,
+        }
+
+        mttr = {
+            "total_incidents": 12,
+            "avg_recovery_seconds": 1845.3,
+            "median_recovery_seconds": 1520.0,
+            "max_recovery_seconds": 5420.0,
+            "min_recovery_seconds": 280.0,
+        }
+
+        config_changes = {
+            "total_changes": 89,
+            "target_changes": 45,
+            "group_changes": 18,
+            "threshold_changes": 12,
+            "maintenance_changes": 9,
+            "duty_changes": 5,
+        }
+
+        weekly_report = ComplianceReport(
+            report_type="weekly",
+            period_start=start_of_last_week,
+            period_end=end_of_last_week,
+            title=f"{start_of_last_week.strftime('%Y年第%W周')} 合规周报",
+            summary=summary,
+            probe_coverage=probe_coverage,
+            alert_response=alert_response,
+            mttr=mttr,
+            config_changes=config_changes,
+            top_changed_targets=target_list,
+            audit_log_count=156,
+            generated_at=now,
+            generated_by="system",
+        )
+        db.add(weekly_report)
+        db.commit()
+
+        print("Demo compliance reports initialized: 1 weekly report")
+    except Exception as e:
+        print(f"Error initializing demo compliance reports: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
+@app.get("/api/audit-logs", response_model=AuditLogListResponse)
+def list_audit_logs(
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    operation_type: Optional[str] = None,
+    operator: Optional[str] = None,
+    target_name: Optional[str] = None,
+    target_type: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+):
+    result = audit_engine.get_audit_logs(
+        db=db,
+        start_time=start_time,
+        end_time=end_time,
+        operation_type=operation_type,
+        operator=operator,
+        target_name=target_name,
+        target_type=target_type,
+        page=page,
+        page_size=page_size,
+    )
+    return result
+
+
+@app.get("/api/audit-logs/operation-types")
+def get_audit_operation_types():
+    return audit_engine.get_operation_types()
+
+
+@app.get("/api/audit-logs/operators")
+def get_audit_operators(db: Session = Depends(get_db)):
+    return {"operators": audit_engine.get_distinct_operators(db)}
+
+
+@app.get("/api/audit-logs/{log_id}", response_model=AuditLogResponse)
+def get_audit_log(log_id: int, db: Session = Depends(get_db)):
+    log = db.query(AuditLog).filter(AuditLog.id == log_id).first()
+    if not log:
+        raise HTTPException(status_code=404, detail="Audit log not found")
+    return log
+
+
+@app.get("/api/compliance-reports", response_model=ComplianceReportListResponse)
+def list_compliance_reports(
+    report_type: Optional[str] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+):
+    result = compliance_engine.get_reports(
+        db=db,
+        report_type=report_type,
+        start_time=start_time,
+        end_time=end_time,
+        page=page,
+        page_size=page_size,
+    )
+    return {
+        "items": result["items"],
+        "total": result["total"],
+    }
+
+
+@app.get("/api/compliance-reports/{report_id}", response_model=ComplianceReportResponse)
+def get_compliance_report(report_id: int, db: Session = Depends(get_db)):
+    report = compliance_engine.get_report_by_id(db, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Compliance report not found")
+    return report
+
+
+@app.post("/api/compliance-reports/generate", response_model=ComplianceReportResponse)
+def generate_compliance_report(
+    request_body: GenerateReportRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    operator = _get_operator_from_request(request)
+    report = compliance_engine.generate_report(
+        db=db,
+        start_time=request_body.start_time,
+        end_time=request_body.end_time,
+        report_type=request_body.report_type or "custom",
+        generated_by=operator,
+    )
+    return report
+
+
+@app.get("/api/compliance-reports/{report_id}/download")
+def download_compliance_report(report_id: int, db: Session = Depends(get_db)):
+    report = compliance_engine.get_report_by_id(db, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Compliance report not found")
+
+    report_dict = {
+        "id": report.id,
+        "report_type": report.report_type,
+        "period_start": report.period_start.isoformat() if report.period_start else None,
+        "period_end": report.period_end.isoformat() if report.period_end else None,
+        "title": report.title,
+        "summary": report.summary,
+        "probe_coverage": report.probe_coverage,
+        "alert_response": report.alert_response,
+        "mttr": report.mttr,
+        "config_changes": report.config_changes,
+        "top_changed_targets": report.top_changed_targets,
+        "audit_log_count": report.audit_log_count,
+        "generated_at": report.generated_at.isoformat() if report.generated_at else None,
+        "generated_by": report.generated_by,
+    }
+
+    filename = f"compliance_report_{report.id}_{report.report_type}.json"
+    return JSONResponse(
+        content=report_dict,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Type": "application/json",
+        }
+    )
+
+
+@app.delete("/api/compliance-reports/{report_id}")
+def delete_compliance_report(report_id: int, db: Session = Depends(get_db)):
+    success = compliance_engine.delete_report(db, report_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Compliance report not found")
+    return {"message": "Report deleted successfully"}
+
+
+@app.post("/api/compliance-reports/generate-weekly", response_model=ComplianceReportResponse)
+def generate_weekly_report(request: Request, db: Session = Depends(get_db)):
+    operator = _get_operator_from_request(request)
+    report = compliance_engine.generate_weekly_report(db, generated_by=operator)
+    return report
+
+
+@app.post("/api/compliance-reports/generate-monthly", response_model=ComplianceReportResponse)
+def generate_monthly_report(request: Request, db: Session = Depends(get_db)):
+    operator = _get_operator_from_request(request)
+    report = compliance_engine.generate_monthly_report(db, generated_by=operator)
+    return report
 
