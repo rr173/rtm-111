@@ -921,3 +921,81 @@ class HealthRankingSnapshot(Base):
     avg_score = Column(Float, nullable=False, default=0)
     data = Column(JSON, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SLAContract(Base):
+    __tablename__ = "sla_contracts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    party_a = Column(String(255), nullable=False)
+    party_b = Column(String(255), nullable=False)
+    effective_date = Column(DateTime, nullable=False, index=True)
+    expiry_date = Column(DateTime, nullable=False, index=True)
+    monthly_availability_target = Column(Float, nullable=False, default=99.95)
+    max_single_outage_minutes = Column(Integer, nullable=False, default=30)
+    max_monthly_outage_minutes = Column(Integer, nullable=False, default=22)
+    penalty_rate = Column(Float, nullable=False, default=0.1)
+    status = Column(String(20), default="active", index=True)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    targets = relationship("SLAContractTarget", back_populates="contract", cascade="all, delete-orphan")
+    violations = relationship("SLAViolation", back_populates="contract", cascade="all, delete-orphan")
+    monthly_stats = relationship("SLAMonthlyPerformance", back_populates="contract", cascade="all, delete-orphan")
+
+
+class SLAContractTarget(Base):
+    __tablename__ = "sla_contract_targets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    contract_id = Column(Integer, ForeignKey("sla_contracts.id"), nullable=False, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    contract = relationship("SLAContract", back_populates="targets")
+    target = relationship("ProbeTarget", backref="sla_contracts")
+
+
+class SLAViolation(Base):
+    __tablename__ = "sla_violations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    contract_id = Column(Integer, ForeignKey("sla_contracts.id"), nullable=False, index=True)
+    target_id = Column(Integer, ForeignKey("probe_targets.id"), nullable=False, index=True)
+    violation_type = Column(String(30), nullable=False, index=True)
+    detected_at = Column(DateTime, nullable=False, index=True)
+    actual_duration_minutes = Column(Float, nullable=False)
+    exceeded_minutes = Column(Float, nullable=False)
+    alert_id = Column(Integer, ForeignKey("alerts.id"), nullable=True)
+    incident_id = Column(Integer, ForeignKey("incidents.id"), nullable=True)
+    estimated_penalty = Column(Float, nullable=False, default=0)
+    acknowledged = Column(Boolean, default=False)
+    acknowledged_at = Column(DateTime, nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    contract = relationship("SLAContract", back_populates="violations")
+    target = relationship("ProbeTarget", backref="sla_violations")
+    alert = relationship("Alert", backref="sla_violations")
+    incident = relationship("Incident", backref="sla_violations")
+
+
+class SLAMonthlyPerformance(Base):
+    __tablename__ = "sla_monthly_performance"
+
+    id = Column(Integer, primary_key=True, index=True)
+    contract_id = Column(Integer, ForeignKey("sla_contracts.id"), nullable=False, index=True)
+    month = Column(String(7), nullable=False, index=True)
+    availability_pct = Column(Float, nullable=False, default=100.0)
+    total_outage_minutes = Column(Float, nullable=False, default=0)
+    violation_count = Column(Integer, nullable=False, default=0)
+    single_outage_violations = Column(Integer, nullable=False, default=0)
+    monthly_outage_violations = Column(Integer, nullable=False, default=0)
+    total_penalty = Column(Float, nullable=False, default=0)
+    status = Column(String(20), default="compliant", index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    contract = relationship("SLAContract", back_populates="monthly_stats")

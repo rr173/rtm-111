@@ -22,6 +22,8 @@ import CapacityMonitor from './components/CapacityMonitor';
 import AuditLogPage from './components/AuditLogPage';
 import ComplianceReportPage from './components/ComplianceReportPage';
 import HealthRankingPanel from './components/HealthRankingPanel';
+import SLAContractList from './components/SLAContractList';
+import SLAContractDetail from './components/SLAContractDetail';
 
 const API_BASE = import.meta.env.VITE_API_HTTP_URL || '';
 
@@ -61,6 +63,7 @@ function App() {
   const [showRuleEditor, setShowRuleEditor] = useState(false);
   const [detailData, setDetailData] = useState({});
   const [rules, setRules] = useState([]);
+  const [selectedSlaContractId, setSelectedSlaContractId] = useState(null);
 
   const loadRules = useCallback(async () => {
     try {
@@ -310,6 +313,15 @@ function App() {
             📊 合规报告
           </button>
           <button
+            className={`tab-btn ${activeTab === 'sla' ? 'active' : ''}`}
+            onClick={() => {
+              setActiveTab('sla');
+              setSelectedSlaContractId(null);
+            }}
+          >
+            📄 SLA合同
+          </button>
+          <button
             className={`tab-btn`}
             onClick={() => setShowRuleEditor(true)}
           >
@@ -427,6 +439,17 @@ function App() {
             <AuditLogPage />
           ) : activeTab === 'compliance' ? (
             <ComplianceReportPage />
+          ) : activeTab === 'sla' ? (
+            selectedSlaContractId ? (
+              <SLAContractDetail
+                contractId={selectedSlaContractId}
+                onBack={() => setSelectedSlaContractId(null)}
+              />
+            ) : (
+              <SLAContractList
+                onViewDetail={(id) => setSelectedSlaContractId(id)}
+              />
+            )
           ) : activeTab === 'replay' ? (
             <div className="replay-page">
               <div className="replay-panels">
@@ -473,7 +496,7 @@ function App() {
           )}
         </div>
 
-        {activeTab !== 'slo' && activeTab !== 'command' && activeTab !== 'noise' && activeTab !== 'discovery' && activeTab !== 'replay' && activeTab !== 'duty' && activeTab !== 'capacity' && activeTab !== 'audit' && activeTab !== 'compliance' ? (
+        {activeTab !== 'slo' && activeTab !== 'command' && activeTab !== 'noise' && activeTab !== 'discovery' && activeTab !== 'replay' && activeTab !== 'duty' && activeTab !== 'capacity' && activeTab !== 'audit' && activeTab !== 'compliance' && activeTab !== 'sla' ? (
           <div className="right-panel">
             <AlertPanel
               alerts={alerts}

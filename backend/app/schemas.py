@@ -1724,3 +1724,142 @@ class HealthScoreDetailResponse(BaseModel):
 
 class TriggerHealthScoreRequest(BaseModel):
     target_ids: Optional[List[int]] = None
+
+
+class SLAContractCreate(BaseModel):
+    name: str
+    party_a: str
+    party_b: str
+    effective_date: datetime
+    expiry_date: datetime
+    monthly_availability_target: float = Field(99.95, ge=0, le=100)
+    max_single_outage_minutes: int = Field(30, ge=1)
+    max_monthly_outage_minutes: int = Field(22, ge=1)
+    penalty_rate: float = Field(0.1, ge=0, le=1)
+    status: Optional[str] = "active"
+    description: Optional[str] = None
+    target_ids: List[int] = []
+
+
+class SLAContractUpdate(BaseModel):
+    name: Optional[str] = None
+    party_a: Optional[str] = None
+    party_b: Optional[str] = None
+    effective_date: Optional[datetime] = None
+    expiry_date: Optional[datetime] = None
+    monthly_availability_target: Optional[float] = Field(None, ge=0, le=100)
+    max_single_outage_minutes: Optional[int] = Field(None, ge=1)
+    max_monthly_outage_minutes: Optional[int] = Field(None, ge=1)
+    penalty_rate: Optional[float] = Field(None, ge=0, le=1)
+    status: Optional[str] = None
+    description: Optional[str] = None
+    target_ids: Optional[List[int]] = None
+
+
+class SLAContractTargetResponse(BaseModel):
+    id: int
+    contract_id: int
+    target_id: int
+    target_name: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SLAViolationResponse(BaseModel):
+    id: int
+    contract_id: int
+    contract_name: Optional[str] = None
+    target_id: int
+    target_name: Optional[str] = None
+    violation_type: str
+    detected_at: datetime
+    actual_duration_minutes: float
+    exceeded_minutes: float
+    alert_id: Optional[int] = None
+    incident_id: Optional[int] = None
+    estimated_penalty: float
+    acknowledged: bool
+    acknowledged_at: Optional[datetime] = None
+    notes: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SLAMonthlyPerformanceResponse(BaseModel):
+    id: int
+    contract_id: int
+    month: str
+    availability_pct: float
+    total_outage_minutes: float
+    violation_count: int
+    single_outage_violations: int
+    monthly_outage_violations: int
+    total_penalty: float
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SLAContractResponse(BaseModel):
+    id: int
+    name: str
+    party_a: str
+    party_b: str
+    effective_date: datetime
+    expiry_date: datetime
+    monthly_availability_target: float
+    max_single_outage_minutes: int
+    max_monthly_outage_minutes: int
+    penalty_rate: float
+    status: str
+    description: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    targets: List[SLAContractTargetResponse] = []
+    target_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class SLAContractDetailResponse(SLAContractResponse):
+    current_month_status: str = "compliant"
+    current_month_availability: float = 100.0
+    current_month_outage_minutes: float = 0.0
+    current_month_outage_pct: float = 0.0
+    current_month_violation_count: int = 0
+    days_until_expiry: int = 0
+    is_renewal_needed: bool = False
+    recent_violations: List[SLAViolationResponse] = []
+    monthly_history: List[SLAMonthlyPerformanceResponse] = []
+
+
+class SLAContractListResponse(BaseModel):
+    items: List[SLAContractResponse] = []
+    total: int = 0
+
+
+class SLAViolationListResponse(BaseModel):
+    items: List[SLAViolationResponse] = []
+    total: int = 0
+
+
+class SLAViolationAcknowledge(BaseModel):
+    acknowledged: bool
+    notes: Optional[str] = None
+
+
+class SLAOverviewResponse(BaseModel):
+    total_contracts: int = 0
+    active_contracts: int = 0
+    expiring_soon: int = 0
+    current_violations: int = 0
+    at_risk_contracts: int = 0
+    compliant_contracts: int = 0

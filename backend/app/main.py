@@ -24,6 +24,7 @@ from .models import (
     CapacityBaseline, CapacityDeviationAlert,
     AuditLog, ComplianceReport,
     HealthScore, HealthScoreHistory, HealthRankingSnapshot,
+    SLAContract, SLAContractTarget, SLAViolation, SLAMonthlyPerformance,
 )
 from .schemas import (
     ProbeTargetCreate, ProbeTargetUpdate, ProbeTargetResponse,
@@ -74,6 +75,11 @@ from .schemas import (
     HealthScoreResponse, HealthScoreHistoryResponse,
     HealthRankingSnapshotResponse, HealthRankingResponse,
     HealthScoreDetailResponse, TriggerHealthScoreRequest,
+    SLAContractCreate, SLAContractUpdate, SLAContractResponse,
+    SLAContractDetailResponse, SLAContractListResponse,
+    SLAViolationResponse, SLAViolationListResponse,
+    SLAViolationAcknowledge, SLAMonthlyPerformanceResponse,
+    SLAOverviewResponse, SLAContractTargetResponse,
 )
 from .observer_engine import observer_engine
 from .probe_engine import probe_engine
@@ -86,6 +92,7 @@ from .duty_engine import duty_engine
 from .audit_engine import audit_engine
 from .compliance_engine import compliance_engine
 from .health_engine import health_engine
+from .sla_engine import sla_engine
 from pydantic import BaseModel
 from typing import List as TypingList
 
@@ -1223,6 +1230,115 @@ def _migrate_audit_tables():
             print(f"Audit migration error: {e}")
 
 
+def _migrate_sla_tables():
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        try:
+            sla_tables = {
+                "sla_contracts": """
+                    CREATE TABLE sla_contracts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name VARCHAR(255) NOT NULL,
+                        party_a VARCHAR(255) NOT NULL,
+                        party_b VARCHAR(255) NOT NULL,
+                        effective_date DATETIME NOT NULL,
+                        expiry_date DATETIME NOT NULL,
+                        monthly_availability_target REAL NOT NULL DEFAULT 99.95,
+                        max_single_outage_minutes INTEGER NOT NULL DEFAULT 30,
+                        max_monthly_outage_minutes INTEGER NOT NULL DEFAULT 22,
+                        penalty_rate REAL NOT NULL DEFAULT 0.1,
+                        status VARCHAR(20) DEFAULT 'active',
+                        description TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """,
+                "sla_contract_targets": """
+                    CREATE TABLE sla_contract_targets (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        contract_id INTEGER NOT NULL,
+                        target_id INTEGER NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (contract_id) REFERENCES sla_contracts(id) ON DELETE CASCADE,
+                        FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE CASCADE
+                    )
+                """,
+                "sla_violations": """
+                    CREATE TABLE sla_violations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        contract_id INTEGER NOT NULL,
+                        target_id INTEGER NOT NULL,
+                        violation_type VARCHAR(30) NOT NULL,
+                        detected_at DATETIME NOT NULL,
+                        actual_duration_minutes REAL NOT NULL,
+                        exceeded_minutes REAL NOT NULL,
+                        alert_id INTEGER,
+                        incident_id INTEGER,
+                        estimated_penalty REAL NOT NULL DEFAULT 0,
+                        acknowledged INTEGER DEFAULT 0,
+                        acknowledged_at DATETIME,
+                        notes TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (contract_id) REFERENCES sla_contracts(id) ON DELETE CASCADE,
+                        FOREIGN KEY (target_id) REFERENCES probe_targets(id) ON DELETE CASCADE,
+                        FOREIGN KEY (alert_id) REFERENCES alerts(id),
+                        FOREIGN KEY (incident_id) REFERENCES incidents(id)
+                    )
+                """,
+                "sla_monthly_performance": """
+                    CREATE TABLE sla_monthly_performance (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        contract_id INTEGER NOT NULL,
+                        month VARCHAR(7) NOT NULL,
+                        availability_pct REAL NOT NULL DEFAULT 100.0,
+                        total_outage_minutes REAL NOT NULL DEFAULT 0,
+                        violation_count INTEGER NOT NULL DEFAULT 0,
+                        single_outage_violations INTEGER NOT NULL DEFAULT 0,
+                        monthly_outage_violations INTEGER NOT NULL DEFAULT 0,
+                        total_penalty REAL NOT NULL DEFAULT 0,
+                        status VARCHAR(20) DEFAULT 'compliant',
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """,
+            }
+
+            for table_name, create_sql in sla_tables.items():
+                result = conn.execute(text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"))
+                if not result.fetchone():
+                    conn.execute(text(create_sql))
+                    index_sqls = {
+                        "sla_contracts": [
+                            "CREATE INDEX idx_sla_contracts_status ON sla_contracts(status)",
+                            "CREATE INDEX idx_sla_contracts_effective ON sla_contracts(effective_date)",
+                            "CREATE INDEX idx_sla_contracts_expiry ON sla_contracts(expiry_date)",
+                        ],
+                        "sla_contract_targets": [
+                            "CREATE INDEX idx_sla_ct_contract_id ON sla_contract_targets(contract_id)",
+                            "CREATE INDEX idx_sla_ct_target_id ON sla_contract_targets(target_id)",
+                        ],
+                        "sla_violations": [
+                            "CREATE INDEX idx_sla_v_contract_id ON sla_violations(contract_id)",
+                            "CREATE INDEX idx_sla_v_target_id ON sla_violations(target_id)",
+                            "CREATE INDEX idx_sla_v_type ON sla_violations(violation_type)",
+                            "CREATE INDEX idx_sla_v_detected_at ON sla_violations(detected_at)",
+                        ],
+                        "sla_monthly_performance": [
+                            "CREATE INDEX idx_sla_mp_contract_id ON sla_monthly_performance(contract_id)",
+                            "CREATE INDEX idx_sla_mp_month ON sla_monthly_performance(month)",
+                            "CREATE INDEX idx_sla_mp_status ON sla_monthly_performance(status)",
+                        ],
+                    }
+                    if table_name in index_sqls:
+                        for idx_sql in index_sqls[table_name]:
+                            conn.execute(text(idx_sql))
+                    print(f"Created table {table_name}")
+
+            conn.commit()
+        except Exception as e:
+            print(f"SLA migration error: {e}")
+
+
 def _get_operator_from_request(request: Request = None) -> Optional[str]:
     if request is None:
         return None
@@ -1239,6 +1355,7 @@ _create_tables()
 _migrate_database()
 _migrate_capacity_tables()
 _migrate_audit_tables()
+_migrate_sla_tables()
 
 app = FastAPI(title="Probe Dashboard API")
 
@@ -1356,6 +1473,7 @@ async def startup_event():
     _init_demo_audit()
     _init_demo_compliance_reports()
     _init_demo_health_scores()
+    _init_demo_sla_contracts()
     incident_engine.attach_callbacks()
     maintenance_engine.register_status_callback(lambda data: manager.broadcast_maintenance_update())
     await observer_engine.start()
@@ -1366,6 +1484,8 @@ async def startup_event():
     await duty_engine.start()
     health_engine.register_update_callback(lambda: manager.broadcast_health_update())
     await health_engine.start()
+
+    sla_engine.start()
 
     asyncio.create_task(_capacity_snapshot_loop())
 
@@ -1378,6 +1498,7 @@ async def shutdown_event():
     await maintenance_engine.stop()
     await duty_engine.stop()
     await health_engine.stop()
+    sla_engine.stop()
 
 
 def _init_demo_slo():
@@ -8850,4 +8971,552 @@ def _init_demo_health_scores():
         db.rollback()
     finally:
         db.close()
+
+
+def _init_demo_sla_contracts():
+    db = next(get_db())
+    try:
+        contract_count = db.query(SLAContract).count()
+        if contract_count > 0:
+            return
+
+        now = datetime.utcnow()
+        target_healthy = db.query(ProbeTarget).filter(ProbeTarget.name.like("%健康%")).first()
+        target_degraded = db.query(ProbeTarget).filter(ProbeTarget.name.like("%间歇%")).first()
+        target_down = db.query(ProbeTarget).filter(ProbeTarget.name.like("%不可达%")).first()
+        group_prod = db.query(ProbeGroup).filter(ProbeGroup.name.like("%生产%")).first()
+
+        contract1 = SLAContract(
+            name="核心API服务SLA合同 - 优质客户",
+            party_a="优质客户科技有限公司",
+            party_b="我们的云服务公司",
+            effective_date=now - timedelta(days=90),
+            expiry_date=now + timedelta(days=270),
+            monthly_availability_target=99.95,
+            max_single_outage_minutes=30,
+            max_monthly_outage_minutes=22,
+            penalty_rate=0.5,
+            status="active",
+            description="面向重要客户的核心API服务级别协议，承诺月度99.95%可用性",
+            created_at=now - timedelta(days=90),
+            updated_at=now,
+        )
+        db.add(contract1)
+
+        contract2 = SLAContract(
+            name="边缘节点SLA合同 - 标准客户",
+            party_a="标准客户网络科技",
+            party_b="我们的云服务公司",
+            effective_date=now - timedelta(days=60),
+            expiry_date=now + timedelta(days=15),
+            monthly_availability_target=99.9,
+            max_single_outage_minutes=60,
+            max_monthly_outage_minutes=43,
+            penalty_rate=0.2,
+            status="active",
+            description="标准客户的边缘节点SLA，即将到期需要续约",
+            created_at=now - timedelta(days=60),
+            updated_at=now,
+        )
+        db.add(contract2)
+
+        db.flush()
+
+        if target_healthy:
+            binding1 = SLAContractTarget(
+                contract_id=contract1.id,
+                target_id=target_healthy.id,
+                created_at=now - timedelta(days=90),
+            )
+            db.add(binding1)
+
+        if target_degraded:
+            binding2 = SLAContractTarget(
+                contract_id=contract2.id,
+                target_id=target_degraded.id,
+                created_at=now - timedelta(days=60),
+            )
+            db.add(binding2)
+
+        if target_down:
+            binding3 = SLAContractTarget(
+                contract_id=contract2.id,
+                target_id=target_down.id,
+                created_at=now - timedelta(days=30),
+            )
+            db.add(binding3)
+
+        db.flush()
+
+        months = []
+        for i in range(5, -1, -1):
+            month_date = now - timedelta(days=i * 30)
+            month_str = month_date.strftime("%Y-%m")
+            months.append((month_str, month_date))
+
+        for contract_idx, contract in enumerate([contract1, contract2]):
+            for month_str, month_date in months:
+                if contract_idx == 0:
+                    availability = 99.97 + (hash(f"sla_demo_{contract.id}_{month_str}") % 3) / 100
+                    outage_minutes = max(0, 22 - (hash(f"sla_outage_{contract.id}_{month_str}") % 15))
+                    violation_count = 0
+                    single_violations = 0
+                    monthly_violations = 0
+                    total_penalty = 0
+                    status = "compliant"
+                else:
+                    if month_str == months[-1][0]:
+                        availability = 99.7
+                        outage_minutes = 130
+                        violation_count = 3
+                        single_violations = 2
+                        monthly_violations = 1
+                        total_penalty = 250.0
+                        status = "violated"
+                    elif month_str == months[-2][0]:
+                        availability = 99.85
+                        outage_minutes = 65
+                        violation_count = 1
+                        single_violations = 1
+                        monthly_violations = 0
+                        total_penalty = 10.0
+                        status = "violated"
+                    else:
+                        availability = 99.92 + (hash(f"sla_demo2_{contract.id}_{month_str}") % 5) / 100
+                        outage_minutes = 30 + (hash(f"sla_out2_{contract.id}_{month_str}") % 20)
+                        violation_count = 0
+                        single_violations = 0
+                        monthly_violations = 0
+                        total_penalty = 0
+                        status = "compliant"
+
+                monthly_stat = SLAMonthlyPerformance(
+                    contract_id=contract.id,
+                    month=month_str,
+                    availability_pct=round(availability, 4),
+                    total_outage_minutes=round(outage_minutes, 2),
+                    violation_count=violation_count,
+                    single_outage_violations=single_violations,
+                    monthly_outage_violations=monthly_violations,
+                    total_penalty=round(total_penalty, 2),
+                    status=status,
+                    created_at=month_date,
+                    updated_at=now,
+                )
+                db.add(monthly_stat)
+
+        if contract2.id and target_down:
+            violation1 = SLAViolation(
+                contract_id=contract2.id,
+                target_id=target_down.id,
+                violation_type="single_outage",
+                detected_at=now - timedelta(days=2, hours=3),
+                actual_duration_minutes=75.5,
+                exceeded_minutes=15.5,
+                estimated_penalty=3.1,
+                acknowledged=False,
+                notes="凌晨时段核心交换机故障导致",
+                created_at=now - timedelta(days=2, hours=3),
+            )
+            db.add(violation1)
+
+            violation2 = SLAViolation(
+                contract_id=contract2.id,
+                target_id=target_down.id,
+                violation_type="single_outage",
+                detected_at=now - timedelta(days=5, hours=8),
+                actual_duration_minutes=90.0,
+                exceeded_minutes=30.0,
+                estimated_penalty=6.0,
+                acknowledged=True,
+                acknowledged_at=now - timedelta(days=5, hours=10),
+                notes="DDoS攻击导致的服务中断，已处理",
+                created_at=now - timedelta(days=5, hours=8),
+            )
+            db.add(violation2)
+
+            violation3 = SLAViolation(
+                contract_id=contract2.id,
+                target_id=target_down.id,
+                violation_type="monthly_outage",
+                detected_at=now - timedelta(days=1),
+                actual_duration_minutes=130.0,
+                exceeded_minutes=87.0,
+                estimated_penalty=34.8,
+                acknowledged=False,
+                notes="本月累计故障时长达标，触发月度违约",
+                created_at=now - timedelta(days=1),
+            )
+            db.add(violation3)
+
+        db.commit()
+        print("Demo SLA contracts initialized")
+    except Exception as e:
+        print(f"Demo SLA contracts init error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _enrich_sla_contract(contract: SLAContract, db: Session) -> dict:
+    target_responses = []
+    for binding in contract.targets:
+        target = binding.target
+        target_responses.append({
+            "id": binding.id,
+            "contract_id": binding.contract_id,
+            "target_id": binding.target_id,
+            "target_name": target.name if target else None,
+            "created_at": binding.created_at,
+        })
+
+    status_info = sla_engine.get_contract_current_status(db, contract)
+
+    return {
+        "id": contract.id,
+        "name": contract.name,
+        "party_a": contract.party_a,
+        "party_b": contract.party_b,
+        "effective_date": contract.effective_date,
+        "expiry_date": contract.expiry_date,
+        "monthly_availability_target": contract.monthly_availability_target,
+        "max_single_outage_minutes": contract.max_single_outage_minutes,
+        "max_monthly_outage_minutes": contract.max_monthly_outage_minutes,
+        "penalty_rate": contract.penalty_rate,
+        "status": contract.status,
+        "description": contract.description,
+        "created_at": contract.created_at,
+        "updated_at": contract.updated_at,
+        "targets": target_responses,
+        "target_count": len(target_responses),
+        "current_month_status": status_info["current_month_status"],
+        "current_month_availability": status_info["current_month_availability"],
+        "monthly_outage_used": status_info["current_month_outage_minutes"],
+        "monthly_outage_used_pct": status_info["current_month_outage_pct"],
+        "monthly_violation_count": status_info["current_month_violation_count"],
+        "days_until_expiry": status_info["days_until_expiry"],
+        "is_renewal_needed": status_info["is_renewal_needed"],
+    }
+
+
+@app.get("/api/sla/overview")
+def get_sla_overview(db: Session = Depends(get_db)):
+    now = datetime.utcnow()
+    thirty_days_later = now + timedelta(days=30)
+
+    total_contracts = db.query(SLAContract).count()
+    active_contracts = db.query(SLAContract).filter(SLAContract.status == "active").count()
+    expiring_soon = db.query(SLAContract).filter(
+        SLAContract.status == "active",
+        SLAContract.expiry_date <= thirty_days_later,
+        SLAContract.expiry_date >= now,
+    ).count()
+
+    current_month = now.strftime("%Y-%m")
+    current_violations = db.query(SLAViolation).filter(
+        SLAViolation.detected_at >= now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    ).count()
+
+    at_risk_contracts = 0
+    compliant_contracts = 0
+
+    active_contract_list = db.query(SLAContract).filter(SLAContract.status == "active").all()
+    for contract in active_contract_list:
+        status_info = sla_engine.get_contract_current_status(db, contract)
+        if status_info["current_month_status"] == "violated":
+            at_risk_contracts += 1
+        elif status_info["current_month_status"] == "compliant":
+            compliant_contracts += 1
+        else:
+            at_risk_contracts += 1
+
+    return SLAOverviewResponse(
+        total_contracts=total_contracts,
+        active_contracts=active_contracts,
+        expiring_soon=expiring_soon,
+        current_violations=current_violations,
+        at_risk_contracts=at_risk_contracts,
+        compliant_contracts=compliant_contracts,
+    )
+
+
+@app.get("/api/sla/contracts")
+def get_sla_contracts(
+    status: Optional[str] = None,
+    sort_by: str = "expiry_date",
+    sort_order: str = "asc",
+    db: Session = Depends(get_db)
+):
+    query = db.query(SLAContract).options(joinedload(SLAContract.targets))
+
+    if status:
+        query = query.filter(SLAContract.status == status)
+
+    if sort_by == "expiry_date":
+        sort_column = SLAContract.expiry_date
+    elif sort_by == "created_at":
+        sort_column = SLAContract.created_at
+    elif sort_by == "name":
+        sort_column = SLAContract.name
+    else:
+        sort_column = SLAContract.expiry_date
+
+    if sort_order == "desc":
+        query = query.order_by(sort_column.desc())
+    else:
+        query = query.order_by(sort_column.asc())
+
+    contracts = query.all()
+    result = [_enrich_sla_contract(c, db) for c in contracts]
+
+    return SLAContractListResponse(
+        items=result,
+        total=len(result),
+    )
+
+
+@app.get("/api/sla/contracts/{contract_id}")
+def get_sla_contract_detail(contract_id: int, db: Session = Depends(get_db)):
+    contract = db.query(SLAContract).options(joinedload(SLAContract.targets)).filter(
+        SLAContract.id == contract_id
+    ).first()
+    if not contract:
+        raise HTTPException(status_code=404, detail="SLA Contract not found")
+
+    contract_data = _enrich_sla_contract(contract, db)
+    status_info = sla_engine.get_contract_current_status(db, contract)
+
+    recent_violations = db.query(SLAViolation).filter(
+        SLAViolation.contract_id == contract_id
+    ).order_by(SLAViolation.detected_at.desc()).limit(20).all()
+
+    monthly_estimated_penalty = sum(v.estimated_penalty or 0 for v in recent_violations)
+
+    violation_responses = []
+    for v in recent_violations:
+        target = v.target
+        violation_responses.append({
+            "id": v.id,
+            "contract_id": v.contract_id,
+            "contract_name": contract.name,
+            "target_id": v.target_id,
+            "target_name": target.name if target else None,
+            "violation_type": v.violation_type,
+            "detected_at": v.detected_at,
+            "actual_duration_minutes": v.actual_duration_minutes,
+            "exceeded_minutes": v.exceeded_minutes,
+            "alert_id": v.alert_id,
+            "incident_id": v.incident_id,
+            "estimated_penalty": v.estimated_penalty,
+            "acknowledged": v.acknowledged,
+            "acknowledged_at": v.acknowledged_at,
+            "notes": v.notes,
+            "created_at": v.created_at,
+        })
+
+    monthly_history = db.query(SLAMonthlyPerformance).filter(
+        SLAMonthlyPerformance.contract_id == contract_id
+    ).order_by(SLAMonthlyPerformance.month.desc()).limit(6).all()
+    monthly_history = list(reversed(monthly_history))
+
+    monthly_estimated_penalty = sum(v.estimated_penalty or 0 for v in recent_violations)
+
+    detail = {
+        **contract_data,
+        **status_info,
+        "recent_violations": violation_responses,
+        "monthly_history": monthly_history,
+        "monthly_estimated_penalty": round(monthly_estimated_penalty, 2),
+    }
+
+    return detail
+
+
+@app.post("/api/sla/contracts")
+def create_sla_contract(contract_data: SLAContractCreate, db: Session = Depends(get_db)):
+    contract = SLAContract(
+        name=contract_data.name,
+        party_a=contract_data.party_a,
+        party_b=contract_data.party_b,
+        effective_date=contract_data.effective_date,
+        expiry_date=contract_data.expiry_date,
+        monthly_availability_target=contract_data.monthly_availability_target,
+        max_single_outage_minutes=contract_data.max_single_outage_minutes,
+        max_monthly_outage_minutes=contract_data.max_monthly_outage_minutes,
+        penalty_rate=contract_data.penalty_rate,
+        status=contract_data.status or "active",
+        description=contract_data.description,
+    )
+    db.add(contract)
+    db.flush()
+
+    for target_id in contract_data.target_ids:
+        target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+        if target:
+            binding = SLAContractTarget(
+                contract_id=contract.id,
+                target_id=target_id,
+            )
+            db.add(binding)
+
+    db.commit()
+    db.refresh(contract)
+
+    return _enrich_sla_contract(contract, db)
+
+
+@app.put("/api/sla/contracts/{contract_id}")
+def update_sla_contract(contract_id: int, contract_data: SLAContractUpdate, db: Session = Depends(get_db)):
+    contract = db.query(SLAContract).filter(SLAContract.id == contract_id).first()
+    if not contract:
+        raise HTTPException(status_code=404, detail="SLA Contract not found")
+
+    update_data = contract_data.model_dump(exclude_unset=True)
+
+    target_ids = update_data.pop("target_ids", None)
+
+    for key, value in update_data.items():
+        if value is not None:
+            setattr(contract, key, value)
+
+    if target_ids is not None:
+        db.query(SLAContractTarget).filter(
+            SLAContractTarget.contract_id == contract_id
+        ).delete()
+
+        for target_id in target_ids:
+            target = db.query(ProbeTarget).filter(ProbeTarget.id == target_id).first()
+            if target:
+                binding = SLAContractTarget(
+                    contract_id=contract.id,
+                    target_id=target_id,
+                )
+                db.add(binding)
+
+    db.commit()
+    db.refresh(contract)
+
+    return _enrich_sla_contract(contract, db)
+
+
+@app.delete("/api/sla/contracts/{contract_id}")
+def delete_sla_contract(contract_id: int, db: Session = Depends(get_db)):
+    contract = db.query(SLAContract).filter(SLAContract.id == contract_id).first()
+    if not contract:
+        raise HTTPException(status_code=404, detail="SLA Contract not found")
+
+    db.delete(contract)
+    db.commit()
+
+    return {"ok": True, "message": "SLA Contract deleted successfully"}
+
+
+@app.get("/api/sla/contracts/{contract_id}/violations")
+def get_sla_contract_violations(
+    contract_id: int,
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db)
+):
+    contract = db.query(SLAContract).filter(SLAContract.id == contract_id).first()
+    if not contract:
+        raise HTTPException(status_code=404, detail="SLA Contract not found")
+
+    query = db.query(SLAViolation).filter(
+        SLAViolation.contract_id == contract_id
+    ).order_by(SLAViolation.detected_at.desc())
+
+    total = query.count()
+    violations = query.offset(offset).limit(limit).all()
+
+    violation_responses = []
+    for v in violations:
+        target = v.target
+        violation_responses.append({
+            "id": v.id,
+            "contract_id": v.contract_id,
+            "contract_name": contract.name,
+            "target_id": v.target_id,
+            "target_name": target.name if target else None,
+            "violation_type": v.violation_type,
+            "detected_at": v.detected_at,
+            "actual_duration_minutes": v.actual_duration_minutes,
+            "exceeded_minutes": v.exceeded_minutes,
+            "alert_id": v.alert_id,
+            "incident_id": v.incident_id,
+            "estimated_penalty": v.estimated_penalty,
+            "acknowledged": v.acknowledged,
+            "acknowledged_at": v.acknowledged_at,
+            "notes": v.notes,
+            "created_at": v.created_at,
+        })
+
+    return SLAViolationListResponse(
+        items=violation_responses,
+        total=total,
+    )
+
+
+@app.put("/api/sla/violations/{violation_id}/acknowledge")
+def acknowledge_sla_violation(
+    violation_id: int,
+    data: SLAViolationAcknowledge,
+    db: Session = Depends(get_db)
+):
+    violation = db.query(SLAViolation).filter(SLAViolation.id == violation_id).first()
+    if not violation:
+        raise HTTPException(status_code=404, detail="SLA Violation not found")
+
+    violation.acknowledged = data.acknowledged
+    if data.acknowledged:
+        violation.acknowledged_at = datetime.utcnow()
+    else:
+        violation.acknowledged_at = None
+
+    if data.notes is not None:
+        violation.notes = data.notes
+
+    db.commit()
+    db.refresh(violation)
+
+    contract = db.query(SLAContract).filter(SLAContract.id == violation.contract_id).first()
+    target = violation.target
+
+    return {
+        "id": violation.id,
+        "contract_id": violation.contract_id,
+        "contract_name": contract.name if contract else None,
+        "target_id": violation.target_id,
+        "target_name": target.name if target else None,
+        "violation_type": violation.violation_type,
+        "detected_at": violation.detected_at,
+        "actual_duration_minutes": violation.actual_duration_minutes,
+        "exceeded_minutes": violation.exceeded_minutes,
+        "alert_id": violation.alert_id,
+        "incident_id": violation.incident_id,
+        "estimated_penalty": violation.estimated_penalty,
+        "acknowledged": violation.acknowledged,
+        "acknowledged_at": violation.acknowledged_at,
+        "notes": violation.notes,
+        "created_at": violation.created_at,
+    }
+
+
+@app.get("/api/sla/contracts/{contract_id}/monthly-stats")
+def get_sla_monthly_stats(
+    contract_id: int,
+    months: int = 6,
+    db: Session = Depends(get_db)
+):
+    contract = db.query(SLAContract).filter(SLAContract.id == contract_id).first()
+    if not contract:
+        raise HTTPException(status_code=404, detail="SLA Contract not found")
+
+    stats = db.query(SLAMonthlyPerformance).filter(
+        SLAMonthlyPerformance.contract_id == contract_id
+    ).order_by(SLAMonthlyPerformance.month.desc()).limit(months).all()
+
+    return list(reversed(stats))
 
