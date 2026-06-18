@@ -1435,21 +1435,28 @@ class CapacityDeviationAnalysis(BaseModel):
     active_deviation_alerts: List[CapacityDeviationAlertResponse] = []
 
 
-class CapacityDetailResponse(BaseModel):
-    target_id: int
-    target_name: str
-    group_name: Optional[str] = None
-    config: Optional[CapacityConfigResponse] = None
-    current_water_level: float
-    water_level_status: str
-    trend: List[CapacityHourlyPoint] = []
-    heatmap: List[CapacityHeatmapCell] = []
-    prediction: Optional[CapacityPredictionResult] = None
-    plans: List[CapacityPlanResponse] = []
-    alerts: List[CapacityAlertResponse] = []
-    baseline_band: List[CapacityBaselineBandPoint] = []
-    deviation_analysis: Optional[CapacityDeviationAnalysis] = None
-    effective_deviation_threshold: float = 30.0
+class CapacityHourlyPoint(BaseModel):
+    hour: Optional[datetime] = None
+    overall_utilization: float = 0.0
+    latency_utilization: float = 0.0
+    connection_utilization: float = 0.0
+    throughput_utilization: float = 0.0
+
+
+class CapacityHeatmapCell(BaseModel):
+    date: str
+    hour: int
+    utilization: float
+
+
+class CapacityPredictionResult(BaseModel):
+    predicted_breach_85_at: Optional[datetime] = None
+    predicted_breach_100_at: Optional[datetime] = None
+    prediction_points: List[CapacityHourlyPoint] = []
+    slope: float = 0.0
+    current_trend: str = "stable"
+
+
 
 
 class CapacityOverviewItem(BaseModel):
@@ -1475,28 +1482,6 @@ class CapacityOverviewResponse(BaseModel):
     active_alerts: int = 0
     total_targets: int = 0
     configured_targets: int = 0
-
-
-class CapacityHourlyPoint(BaseModel):
-    hour: Optional[datetime] = None
-    overall_utilization: float = 0.0
-    latency_utilization: float = 0.0
-    connection_utilization: float = 0.0
-    throughput_utilization: float = 0.0
-
-
-class CapacityHeatmapCell(BaseModel):
-    date: str
-    hour: int
-    utilization: float
-
-
-class CapacityPredictionResult(BaseModel):
-    predicted_breach_85_at: Optional[datetime] = None
-    predicted_breach_100_at: Optional[datetime] = None
-    prediction_points: List[CapacityHourlyPoint] = []
-    slope: float = 0.0
-    current_trend: str = "stable"
 
 
 class CapacityPlanCreate(BaseModel):
@@ -1552,3 +1537,6 @@ class CapacityDetailResponse(BaseModel):
     prediction: Optional[CapacityPredictionResult] = None
     plans: List[CapacityPlanResponse] = []
     alerts: List[CapacityAlertResponse] = []
+    baseline_band: List[CapacityBaselineBandPoint] = []
+    deviation_analysis: Optional[CapacityDeviationAnalysis] = None
+    effective_deviation_threshold: float = 30.0
